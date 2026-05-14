@@ -19,10 +19,10 @@ try:
 except Exception:  # pragma: no cover - optional dependency
     cv2 = None
 
-REMOTE_PEER_HOST = "10.128.42.254"
-REMOTE_PEER_PORT = 5000
+REMOTE_PEER_HOST = "10.218.165.145"
+REMOTE_PEER_PORT = 5001
 LOCAL_LISTEN_HOST = "0.0.0.0"
-LOCAL_LISTEN_PORT = 5001
+LOCAL_LISTEN_PORT = 5000
 
 
 APP_DIR = Path(__file__).resolve().parent
@@ -62,7 +62,8 @@ class SessionStore:
 
 
 class CameraManager:
-    def __init__(self, source_indices: tuple[int, int] = (0, 1)):
+    def __init__(self, app, source_indices: tuple[int, ...] = (0, 1)):
+        self.app = app
         self.source_indices = source_indices
         self.captures: list[dict] = []
         self._open_sources()
@@ -79,11 +80,14 @@ class CameraManager:
         for index in self.source_indices:
             capture = cv2.VideoCapture(index)
             if capture.isOpened():
-                capture.set(cv2.CAP_PROP_FRAME_WIDTH, 640)
-                capture.set(cv2.CAP_PROP_FRAME_HEIGHT, 480)
-                self.captures.append({"index": index, "capture": capture})
+                capture.set(cv2.CAP_PROP_FRAME_WIDTH, 1920)
+                capture.set(cv2.CAP_PROP_FRAME_HEIGHT, 1080)
+                self.captures.append({"type": "camera", "index": index, "capture": capture})
             else:
                 capture.release()
+
+        # Add remote source
+        self.captures.append({"type": "remote", "index": "remote"})
 
     def refresh(self) -> None:
         if not self.captures:
@@ -93,15 +97,24 @@ class CameraManager:
         if slot_index >= len(self.captures):
             return False, None, None
         entry = self.captures[slot_index]
-        capture = entry["capture"]
-        ok, frame = capture.read()
-        return ok, frame, entry["index"]
+        if entry["type"] == "camera":
+            capture = entry["capture"]
+            ok, frame = capture.read()
+            return ok, frame, entry["index"]
+        elif entry["type"] == "remote":
+            if self.app._remote_pil is not None:
+                # Convert PIL to numpy array
+                import numpy as np
+                frame = np.array(self.app._remote_pil)
+                frame = cv2.cvtColor(frame, cv2.COLOR_RGB2BGR)
+                return True, frame, "remote"
+            else:
+                return False, None, "remote"
 
     def close(self) -> None:
         for entry in self.captures:
-            capture = entry["capture"]
-            if capture is not None:
-                capture.release()
+            if entry["type"] == "camera" and entry.get("capture") is not None:
+                entry["capture"].release()
         self.captures = []
 
 
@@ -112,7 +125,7 @@ class CyberTrainerApp(tk.Tk):
         self.state("zoomed")
         self.configure(bg="#0b1220")
 
-        self.camera = CameraManager()
+        self.camera = CameraManager(self)
         self.store = SessionStore(HISTORY_FILE)
 
         self.session_active = False
@@ -134,6 +147,8 @@ class CyberTrainerApp(tk.Tk):
         self._camera_images: dict[str, ImageTk.PhotoImage | None] = {"front": None, "side": None}
         self._remote_photo: ImageTk.PhotoImage | None = None
         self._remote_pil = None
+        self.source1_var = tk.StringVar(value="Kamera 0")
+        self.source2_var = tk.StringVar(value="Kamera 1")
 
         self.peer_host = REMOTE_PEER_HOST
         self.peer_port = REMOTE_PEER_PORT
@@ -142,9 +157,11 @@ class CyberTrainerApp(tk.Tk):
         self._network_server_thread: threading.Thread | None = None
         self._network_server_socket: socket.socket | None = None
         self._network_stop_event = threading.Event()
-        self._incoming_frames: "queue.Queue[bytes]" = queue.Queue(maxsize=4)
-        self._last_network_send = 0.0
-        self._network_send_interval = 0.25
+        self._network_send_thread: threading.Thread | None = None
+        self._network_send_stop_event = threading.Event()
+        self._incoming_frames: "queue.Queue[bytes]" = queue.Queue(maxsize=10)
+        self._network_send_interval = 0.016
+        self._send_socket: socket.socket | None = None
 
         self._setup_style()
         self._build_ui()
@@ -261,7 +278,7 @@ class CyberTrainerApp(tk.Tk):
         ttk.Label(parent, text="Podglad z kamer + warstwa AR", style="Section.TLabel").pack(anchor="w")
         ttk.Label(
             parent,
-            text="To jest dzialajacy panel pod szkielet aplikacji. Jesli dostepne jest OpenCV, aplikacja pokazuje realny obraz z kamer. Gdy podlaczona jest tylko jedna kamera, drugi panel pozostaje czarny.",
+            text="Wybierz źródło dla każdego widoku za pomocą dropdownów.",
             style="CardText.TLabel",
             wraplength=760,
             justify="left",
@@ -272,32 +289,39 @@ class CyberTrainerApp(tk.Tk):
         view_wrap.columnconfigure(0, weight=1)
         view_wrap.columnconfigure(1, weight=1)
         view_wrap.rowconfigure(0, weight=1)
-        view_wrap.rowconfigure(1, weight=1)
 
-        front_panel = ttk.Frame(view_wrap, style="Card.TFrame", padding=(0, 0, 10, 8))
-        side_panel = ttk.Frame(view_wrap, style="Card.TFrame", padding=(10, 0, 0, 8))
-        remote_panel = ttk.Frame(view_wrap, style="Card.TFrame", padding=(0, 8, 0, 0))
-        front_panel.grid(row=0, column=0, sticky="nsew")
-        side_panel.grid(row=0, column=1, sticky="nsew")
-        remote_panel.grid(row=1, column=0, columnspan=2, sticky="nsew")
+        left_panel = ttk.Frame(view_wrap, style="Card.TFrame", padding=(0, 0, 10, 0))
+        right_panel = ttk.Frame(view_wrap, style="Card.TFrame", padding=(10, 0, 0, 0))
+        left_panel.grid(row=0, column=0, sticky="nsew")
+        right_panel.grid(row=0, column=1, sticky="nsew")
 
-        self.front_view = self._create_camera_panel(front_panel, "KAMERA 1")
-        self.side_view = self._create_camera_panel(side_panel, "KAMERA 2")
-        self.remote_view = self._create_camera_panel(remote_panel, "ODBIOR ZDALNY")
+        self.left_view = self._create_camera_panel(left_panel, "Widok 1", self.source1_var)
+        self.right_view = self._create_camera_panel(right_panel, "Widok 2", self.source2_var)
 
-    def _create_camera_panel(self, parent, title):
+    def _create_camera_panel(self, parent, title, source_var):
         wrapper = tk.Frame(parent, bg="#08111f")
         wrapper.pack(fill="both", expand=True)
 
         header = tk.Frame(wrapper, bg="#08111f")
         header.pack(fill="x", pady=(0, 8))
         tk.Label(header, text=title, bg="#08111f", fg="#e2e8f0", font=("Segoe UI", 12, "bold")).pack(side="left")
+        combo = ttk.Combobox(header, textvariable=source_var, values=["Kamera 0", "Kamera 1", "Zdalna"], state="readonly", width=10)
+        combo.pack(side="right", padx=(10, 0))
         status = tk.Label(header, text="szukanie kamery...", bg="#08111f", fg="#94a3b8", font=("Segoe UI", 10))
         status.pack(side="right")
 
         image_label = tk.Label(wrapper, bg="#000000", width=640, height=480, anchor="center")
         image_label.pack(fill="both", expand=True)
         return {"frame": wrapper, "image": image_label, "status": status}
+
+    def _map_source(self, source_str: str) -> int:
+        if source_str == "Kamera 0":
+            return 0
+        elif source_str == "Kamera 1":
+            return 1
+        elif source_str == "Zdalna":
+            return 2
+        return 0
 
     def _fit_frame(self, frame, max_width: int, max_height: int):
         height, width = frame.shape[:2]
@@ -321,7 +345,7 @@ class CyberTrainerApp(tk.Tk):
         resized = rgb.resize(new_size, resample)
         return ImageTk.PhotoImage(resized)
 
-    def _encode_frame_as_jpeg(self, frame, quality: int = 60):
+    def _encode_frame_as_jpeg(self, frame, quality: int = 5):
         if frame is None or cv2 is None:
             return None
         ok, encoded = cv2.imencode(".jpg", frame, [cv2.IMWRITE_JPEG_QUALITY, quality])
@@ -339,18 +363,18 @@ class CyberTrainerApp(tk.Tk):
             data.extend(packet)
         return bytes(data)
 
-    def _safe_log(self, message: str) -> None:
-        if threading.current_thread() is threading.main_thread():
-            self._append_event(message)
-        else:
-            self.after(0, lambda: self._append_event(message))
-
     def _start_frame_server(self) -> None:
         if self._network_server_thread and self._network_server_thread.is_alive():
             return
         self._network_stop_event.clear()
         self._network_server_thread = threading.Thread(target=self._frame_server_loop, daemon=True)
         self._network_server_thread.start()
+
+        if self._network_send_thread and self._network_send_thread.is_alive():
+            return
+        self._network_send_stop_event.clear()
+        self._network_send_thread = threading.Thread(target=self._send_loop, daemon=True)
+        self._network_send_thread.start()
 
     def _stop_frame_server(self) -> None:
         self._network_stop_event.set()
@@ -363,6 +387,17 @@ class CyberTrainerApp(tk.Tk):
             self._network_server_thread.join(timeout=1.0)
             self._network_server_thread = None
 
+        self._network_send_stop_event.set()
+        if self._network_send_thread is not None:
+            self._network_send_thread.join(timeout=1.0)
+            self._network_send_thread = None
+        if self._send_socket is not None:
+            try:
+                self._send_socket.close()
+            except Exception:
+                pass
+            self._send_socket = None
+
     def _frame_server_loop(self) -> None:
         server_socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
         server_socket.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
@@ -371,7 +406,6 @@ class CyberTrainerApp(tk.Tk):
             server_socket.bind((self.listen_host, self.listen_port))
             server_socket.listen(1)
             server_socket.settimeout(1.0)
-            self._safe_log(f"Nasluchuje na {self.listen_host}:{self.listen_port}")
             while not self._network_stop_event.is_set():
                 try:
                     conn, addr = server_socket.accept()
@@ -379,7 +413,6 @@ class CyberTrainerApp(tk.Tk):
                     continue
                 with conn:
                     conn.settimeout(2.0)
-                    self._safe_log(f"Polaczono z {addr[0]}:{addr[1]}")
                     while not self._network_stop_event.is_set():
                         size_bytes = self._recv_exact(conn, 4)
                         if not size_bytes:
@@ -391,14 +424,43 @@ class CyberTrainerApp(tk.Tk):
                         try:
                             self._incoming_frames.put_nowait(payload)
                         except queue.Full:
-                            self._safe_log("Otrzymano obraz, ale kolejka jest pelna")
                             continue
                         self.after(0, self._process_incoming_frames)
         except Exception as exc:
-            self._safe_log(f"Blad serwera sieciowego: {exc}")
+            pass
         finally:
             server_socket.close()
             self._network_server_socket = None
+
+    def _send_loop(self) -> None:
+        while not self._network_send_stop_event.is_set():
+            if self._send_socket is None:
+                try:
+                    self._send_socket = socket.create_connection((self.peer_host, self.peer_port), timeout=1.0)
+                    self._send_socket.settimeout(0.1)
+                except Exception:
+                    self._send_socket = None
+                    time.sleep(1.0)
+                    continue
+            try:
+                ok, frame, source_index = self.camera.read(0)
+                if not ok or frame is None:
+                    time.sleep(self._network_send_interval)
+                    continue
+                payload = self._encode_frame_as_jpeg(frame, quality=10)
+                if not payload:
+                    time.sleep(self._network_send_interval)
+                    continue
+                self._send_socket.sendall(struct.pack("!I", len(payload)))
+                self._send_socket.sendall(payload)
+            except Exception:
+                if self._send_socket:
+                    try:
+                        self._send_socket.close()
+                    except:
+                        pass
+                self._send_socket = None
+            time.sleep(self._network_send_interval)
 
     def _process_incoming_frames(self) -> None:
         while not self._incoming_frames.empty():
@@ -408,27 +470,9 @@ class CyberTrainerApp(tk.Tk):
                 self._remote_pil = incoming_image
                 self._remote_photo = None
                 self.remote_view["status"].configure(text="zdalny obraz")
-                self._safe_log("Odebrano obrazy zdalne")
             except Exception:
-                self._safe_log("Otrzymano nieprawidlowe dane obrazu")
+                pass
 
-    def _update_remote_view(self, view) -> None:
-        image_label = view["image"]
-        status_label = view["status"]
-        max_width = max(320, image_label.winfo_width() or 640)
-        max_height = max(240, image_label.winfo_height() or 480)
-
-        if self._remote_pil is not None:
-            photo = self._pil_to_photo(self._remote_pil, max_width, max_height)
-            image_label.configure(image=photo, bg="#000000")
-            image_label.image = photo
-            self._remote_photo = photo
-            status_label.configure(text="zdalny obraz")
-        else:
-            photo = self._black_photo(max_width, max_height)
-            image_label.configure(image=photo, bg="#000000")
-            image_label.image = photo
-            status_label.configure(text="brak sygnalu zdalnego")
 
     def _send_camera_frame(self) -> None:
         if cv2 is None:
@@ -436,15 +480,15 @@ class CyberTrainerApp(tk.Tk):
         ok, frame, source_index = self.camera.read(0)
         if not ok or frame is None:
             return
-        payload = self._encode_frame_as_jpeg(frame, quality=60)
+        payload = self._encode_frame_as_jpeg(frame, quality=15)
         if not payload:
             return
         try:
-            with socket.create_connection((self.peer_host, self.peer_port), timeout=1.0) as sock:
+            with socket.create_connection((self.peer_host, self.peer_port), timeout=0.01) as sock:
                 sock.sendall(struct.pack("!I", len(payload)))
                 sock.sendall(payload)
         except Exception as exc:
-            self._safe_log(f"Blad wysylki obrazu: {exc}")
+            pass
 
     def _black_photo(self, width: int = 640, height: int = 480):
         image = Image.new("RGB", (width, height), (0, 0, 0))
@@ -690,14 +734,9 @@ class CyberTrainerApp(tk.Tk):
     def _update_loop(self):
         self._update_metrics()
         self._update_camera_status()
-        current_time = time.time()
-        if current_time - self._last_network_send > self._network_send_interval:
-            self._send_camera_frame()
-            self._last_network_send = current_time
-        self._update_camera_view(self.front_view, 0, "front")
-        self._update_camera_view(self.side_view, 1, "side")
-        self._update_remote_view(self.remote_view)
-        self.after(33, self._update_loop)
+        self._update_camera_view(self.left_view, self._map_source(self.source1_var.get()), "left")
+        self._update_camera_view(self.right_view, self._map_source(self.source2_var.get()), "right")
+        self.after(16, self._update_loop)
 
     def _update_metrics(self):
         if not self.session_active or self.session_paused:
