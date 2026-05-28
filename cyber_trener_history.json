@@ -1,0 +1,29 @@
+[
+  {
+    "started_at": 1779957723.3494365,
+    "ended_at": 1779957724.5811758,
+    "repetitions": 0,
+    "warnings": 0,
+    "quality": 91,
+    "source": "Demo mode",
+    "duration_seconds": 1
+  },
+  {
+    "started_at": 1779957410.907542,
+    "ended_at": 1779957413.4075284,
+    "repetitions": 0,
+    "warnings": 0,
+    "quality": 91,
+    "source": "Demo mode",
+    "duration_seconds": 2
+  },
+  {
+    "started_at": 1779957410.907542,
+    "ended_at": 1779957413.038479,
+    "repetitions": 0,
+    "warnings": 0,
+    "quality": 91,
+    "source": "Demo mode",
+    "duration_seconds": 2
+  }
+]

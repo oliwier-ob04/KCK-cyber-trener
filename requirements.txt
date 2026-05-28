@@ -3,3 +3,4 @@ mediapipe
 pyaudio
 speechrecognition
 pygame
+Pillow
