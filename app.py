@@ -58,7 +58,8 @@ class CyberTrainerApp:
             minimum_quality=self.config.minimum_quality,
             feedback=self.exercise.default_feedback,
         )
-        self.analyzer = MovementAnalyzer()
+        # Osobny analyzer dla każdego slotu kamery
+        self.analyzers = {i: MovementAnalyzer() for i in range(self.config.max_camera_slots)}
 
         self.session_active = False
         self.session_paused = False
@@ -106,7 +107,28 @@ class CyberTrainerApp:
     def run(self) -> None:
         """Start background services and enter the Tk event loop."""
 
+        self.camera.refresh_devices()
+        
+        # Przypisz kamery do slotów
+        for slot_index, device_id in enumerate(self.camera.available_devices):
+            if slot_index < self.config.max_camera_slots:
+                self.camera.switch_camera(slot_index, device_id)
+        
         self.transport.start()
+        self.camera.start()
+        
+        # Czekaj na załadowanie się któregokolwiek slotu (max 5 sekund)
+        for i in range(50):
+            any_frame_available = False
+            for slot_idx in range(self.config.max_camera_slots):
+                ok, frame, _ = self.camera.read(slot_idx)
+                if ok and frame is not None:
+                    any_frame_available = True
+                    break
+            if any_frame_available:
+                break
+            time.sleep(0.1)
+        
         self.view.after(self.config.update_interval_ms, self._update_loop)
         self.view.mainloop()
 
@@ -120,7 +142,8 @@ class CyberTrainerApp:
         self.session_paused = False
         self.session_started_at = time.time()
         self.last_tick = self.session_started_at
-        self.analyzer.reset()
+        for analyzer in self.analyzers.values():
+            analyzer.reset()
         self.scorer.reset()
 
         self._update_camera_status()
@@ -265,6 +288,9 @@ class CyberTrainerApp:
             max_height = max(240, panel.holder.winfo_height() or 480)
             ok, frame, source_index = self.camera.read(slot_index)
             if ok and frame is not None:
+                # Analyze frame with MediaPipe for each camera independently
+                letter, frame = self.analyzers[slot_index].analyze_frame(frame)
+                
                 photo = self.renderer.frame_to_photo(frame, max_width, max_height)
                 self.view.update_camera_panel(
                     slot_index=slot_index,
@@ -288,7 +314,7 @@ class CyberTrainerApp:
             now = time.time()
             delta = now - self.last_tick
             self.last_tick = now
-            movement = self.analyzer.step(delta)
+            movement = self.analyzers[0].step(delta)
             snapshot = self.scorer.update(movement)
             if movement.repetition_detected:
                 self.view.append_event(f"Wykryto powtorzenie {snapshot.repetitions}")
@@ -299,6 +325,7 @@ class CyberTrainerApp:
             snapshot = self.scorer.snapshot()
 
         self.view.set_metrics(snapshot, self._format_elapsed())
+        self.view.set_detected_letter(self.analyzers[0].last_detected_letter)
 
         if snapshot.repetitions and snapshot.repetitions % 5 == 0:
             self.view.set_feedback("Dobra praca: utrzymano poprawny zakres ruchu.")

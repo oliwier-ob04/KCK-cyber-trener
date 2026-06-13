@@ -67,6 +67,7 @@ class CyberTrainerView(tk.Tk):
         self.metric_time = tk.StringVar(value="00:00")
         self.metric_quality = tk.StringVar(value=f"{config.default_quality}%")
         self.metric_warnings = tk.StringVar(value="0")
+        self.metric_letter = tk.StringVar(value="Brak")
 
         self._camera_photos: dict[int, object] = {}
         self._panels: list[CameraPanelWidgets] = []
@@ -94,6 +95,11 @@ class CyberTrainerView(tk.Tk):
         self.metric_time.set(elapsed_text)
         self.metric_quality.set(f"{snapshot.quality}%")
         self.metric_warnings.set(str(snapshot.warnings))
+
+    def set_detected_letter(self, letter: str) -> None:
+        """Update the detected gesture letter."""
+
+        self.metric_letter.set(letter)
 
     def set_history(self, entries: Sequence[str]) -> None:
         """Replace the history list with formatted session entries."""
@@ -393,6 +399,7 @@ class CyberTrainerView(tk.Tk):
             ("Czas sesji", self.metric_time),
             ("Jasnosc oceny", self.metric_quality),
             ("Ostrzezenia", self.metric_warnings),
+            ("Rozpoznana litera", self.metric_letter),
         ]:
             row = tk.Frame(stats, bg="#111c33")
             row.pack(fill="x", pady=4)
