@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+import math
 import time
 from typing import Callable, Sequence
 
@@ -67,7 +68,10 @@ class CyberTrainerView(tk.Tk):
         self.metric_time = tk.StringVar(value="00:00")
         self.metric_quality = tk.StringVar(value=f"{config.default_quality}%")
         self.metric_warnings = tk.StringVar(value="0")
-        self.metric_letter = tk.StringVar(value="Brak")
+        self.metric_knee_error = tk.StringVar(value="--")
+        self.technique_knee_value = tk.StringVar(value="stabilne")
+        self.technique_knee_color = "#22c55e"
+        self.technique_knee_label_widget = None
 
         self._camera_photos: dict[int, object] = {}
         self._panels: list[CameraPanelWidgets] = []
@@ -96,10 +100,36 @@ class CyberTrainerView(tk.Tk):
         self.metric_quality.set(f"{snapshot.quality}%")
         self.metric_warnings.set(str(snapshot.warnings))
 
-    def set_detected_letter(self, letter: str) -> None:
-        """Update the detected gesture letter."""
+    def set_knee_error(self, knee_error: float) -> None:
+        """Update the knee alignment error percentage."""
 
-        self.metric_letter.set(letter)
+        if math.isnan(knee_error):
+            self.metric_knee_error.set("--")
+            self.set_knee_technique(float('nan'))
+        else:
+            knee_error_percent = knee_error * 100
+            self.metric_knee_error.set(f"{knee_error_percent:.1f}%")
+            self.set_knee_technique(knee_error_percent)
+
+    def set_knee_technique(self, knee_error_percent: float) -> None:
+        """Update the knee technique row based on error percentage."""
+
+        if math.isnan(knee_error_percent):
+            self.technique_knee_value.set("??% - niewidoczne")
+            self.technique_knee_color = "#94a3b8"  # gray
+        elif knee_error_percent >= 95:
+            self.technique_knee_value.set(f"{knee_error_percent:.1f}% - stabilnie")
+            self.technique_knee_color = "#22c55e"  # green
+        elif knee_error_percent >= 90:
+            self.technique_knee_value.set(f"{knee_error_percent:.1f}% - do dopracowania")
+            self.technique_knee_color = "#f59e0b"  # orange
+        else:
+            self.technique_knee_value.set(f"{knee_error_percent:.1f}% - źle")
+            self.technique_knee_color = "#ef4444"  # red
+        
+        # Update the label color if widget exists
+        if self.technique_knee_label_widget:
+            self.technique_knee_label_widget.configure(fg=self.technique_knee_color)
 
     def set_history(self, entries: Sequence[str]) -> None:
         """Replace the history list with formatted session entries."""
@@ -374,7 +404,19 @@ class CyberTrainerView(tk.Tk):
             row = tk.Frame(left, bg="#111c33")
             row.pack(fill="x", pady=4)
             tk.Label(row, text=row_def.label, bg="#111c33", fg="#94a3b8", font=("Segoe UI", 10)).pack(side="left")
-            tk.Label(row, text=row_def.value, bg="#111c33", fg=row_def.color, font=("Segoe UI", 10, "bold")).pack(side="right")
+            
+            # Use dynamic StringVar for knees row, static text for others
+            if row_def.label == "Kolana":
+                self.technique_knee_label_widget = tk.Label(
+                    row, 
+                    textvariable=self.technique_knee_value, 
+                    bg="#111c33", 
+                    fg=self.technique_knee_color, 
+                    font=("Segoe UI", 10, "bold")
+                )
+                self.technique_knee_label_widget.pack(side="right")
+            else:
+                tk.Label(row, text=row_def.value, bg="#111c33", fg=row_def.color, font=("Segoe UI", 10, "bold")).pack(side="right")
 
         tk.Label(right, text="Komunikaty systemu", bg="#111c33", fg="#cbd5e1", font=("Segoe UI", 10, "bold")).pack(anchor="w", pady=(0, 8))
         self.event_log = tk.Listbox(right, bg="#0b1220", fg="#cbd5e1", highlightthickness=0, selectbackground="#1e293b", borderwidth=0, activestyle="none")
@@ -399,7 +441,7 @@ class CyberTrainerView(tk.Tk):
             ("Czas sesji", self.metric_time),
             ("Jasnosc oceny", self.metric_quality),
             ("Ostrzezenia", self.metric_warnings),
-            ("Rozpoznana litera", self.metric_letter),
+            ("Poprawność kolan", self.metric_knee_error),
         ]:
             row = tk.Frame(stats, bg="#111c33")
             row.pack(fill="x", pady=4)

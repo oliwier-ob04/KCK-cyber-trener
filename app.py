@@ -325,7 +325,7 @@ class CyberTrainerApp:
             snapshot = self.scorer.snapshot()
 
         self.view.set_metrics(snapshot, self._format_elapsed())
-        self.view.set_detected_letter(self.analyzers[0].last_detected_letter)
+        self.view.set_knee_error(self.analyzers[0].last_knee_error)
 
         if snapshot.repetitions and snapshot.repetitions % 5 == 0:
             self.view.set_feedback("Dobra praca: utrzymano poprawny zakres ruchu.")

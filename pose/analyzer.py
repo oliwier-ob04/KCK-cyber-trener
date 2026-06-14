@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import math
-from collections import Counter
 from dataclasses import dataclass
 
 import cv2
@@ -20,7 +19,7 @@ class MovementState:
     movement_state: str
     hip_angle: float
     repetition_detected: bool
-    detected_letter: str = "Brak"
+    knee_error: float = float('nan')
 
 
 class MovementAnalyzer:
@@ -55,61 +54,79 @@ class MovementAnalyzer:
         self.current_phase = 0.0
         self._previous_state = "OPUSZCZANIE"
         self.history = []
-        self.last_detected_letter = "Brak"
+        self.last_knee_error = float('nan')
 
-    def _detect_letter(self, lm) -> str:
-        """Detect gesture letter from pose landmarks (I, T, Y, L)."""
+    def detect_knee_error(self, lm) -> float:
+        """
+        Detect knee alignment error based on whether the legs are parallel.
+        Measures the angle between leg vectors (from knee to ankle).
+        Returns percentage: 100% = perfectly parallel (0°), decreases with angle.
+        Returns NaN if legs not visible.
+        """
         
         if not lm:
-            return "Brak"
+            return float('nan')
             
         try:
-            l_sh = lm[self.mp_pose.PoseLandmark.LEFT_SHOULDER]
-            r_sh = lm[self.mp_pose.PoseLandmark.RIGHT_SHOULDER]
-            l_wr = lm[self.mp_pose.PoseLandmark.LEFT_WRIST]
-            r_wr = lm[self.mp_pose.PoseLandmark.RIGHT_WRIST]
-
-            tol = 0.15
-            i_height = 0.2
-
-            # Letter "I" - both arms up
-            if l_wr.y < l_sh.y - i_height and r_wr.y < r_sh.y - i_height:
-                if abs(l_wr.x - l_sh.x) < tol and abs(r_wr.x - r_sh.x) < tol:
-                    return "I"
-
-            # Letter "T" - arms horizontal
-            if abs(l_wr.y - l_sh.y) < tol and abs(r_wr.y - r_sh.y) < tol:
-                if l_wr.x > l_sh.x and r_wr.x < r_sh.x:
-                    return "T"
-
-            # Letter "Y" - both arms up and spread
-            if l_wr.y < l_sh.y - tol and r_wr.y < r_sh.y - tol:
-                if l_wr.x > l_sh.x + 0.1 and r_wr.x < r_sh.x - 0.1:
-                    return "Y"
-
-            # Letter "L" - right up, left horizontal
-            r_up = r_wr.y < r_sh.y - tol and abs(r_wr.x - r_sh.x) < tol
-            l_side = abs(l_wr.y - l_sh.y) < tol
-
-            if r_up and l_side:
-                return "L"
-
-            return "Brak"
+            # Get knee and ankle landmarks
+            l_knee = lm[self.mp_pose.PoseLandmark.LEFT_KNEE]
+            l_ankle = lm[self.mp_pose.PoseLandmark.LEFT_ANKLE]
+            r_knee = lm[self.mp_pose.PoseLandmark.RIGHT_KNEE]
+            r_ankle = lm[self.mp_pose.PoseLandmark.RIGHT_ANKLE]
+            
+            # Check visibility threshold - if landmarks not visible enough, return NaN
+            visibility_threshold = 0.5
+            if (l_knee.visibility < visibility_threshold or 
+                l_ankle.visibility < visibility_threshold or
+                r_knee.visibility < visibility_threshold or
+                r_ankle.visibility < visibility_threshold):
+                return float('nan')
+            
+            # Create vectors for each leg (from knee to ankle)
+            left_vector = (l_ankle.x - l_knee.x, l_ankle.y - l_knee.y)
+            right_vector = (r_ankle.x - r_knee.x, r_ankle.y - r_knee.y)
+            
+            # Calculate vector lengths
+            left_length = math.sqrt(left_vector[0]**2 + left_vector[1]**2)
+            right_length = math.sqrt(right_vector[0]**2 + right_vector[1]**2)
+            
+            if left_length == 0 or right_length == 0:
+                return float('nan')
+            
+            # Calculate dot product
+            dot_product = left_vector[0] * right_vector[0] + left_vector[1] * right_vector[1]
+            
+            # Calculate cosine of angle between vectors
+            cos_angle = dot_product / (left_length * right_length)
+            
+            # Clamp to [-1, 1] to avoid numerical errors
+            cos_angle = max(-1.0, min(1.0, cos_angle))
+            
+            # Calculate angle in degrees
+            angle_rad = math.acos(abs(cos_angle))
+            angle_deg = math.degrees(angle_rad)
+            
+            # Convert to percentage: 100% at 0°, decreases with angle
+            # Each degree of difference reduces the score by 1%
+            score = max(0, 100 - angle_deg)
+            
+            return score / 100.0  # Return as 0-1 range
+            
         except Exception:
-            return "Brak"
+            return float('nan')
 
-    def analyze_frame(self, frame) -> tuple[str, any]:
-        """Process a video frame, draw landmarks and return detected letter and modified frame."""
+    def analyze_frame(self, frame) -> tuple[float, any]:
+        """Process a video frame, draw landmarks and return knee error percentage and modified frame."""
         
         if frame is None:
-            return "Brak", frame
+            return float('nan'), frame
             
         try:
             frame_copy = frame.copy()
             img_rgb = cv2.cvtColor(frame_copy, cv2.COLOR_BGR2RGB)
             results = self.pose.process(img_rgb)
 
-            current_letter = "Brak"
+            current_knee_error = float('nan')
             if results.pose_landmarks:
                 # Draw landmarks on frame
                 self.mp_drawing.draw_landmarks(
@@ -118,34 +135,17 @@ class MovementAnalyzer:
                     self.mp_pose.POSE_CONNECTIONS
                 )
                 
-                current_letter = self._detect_letter(results.pose_landmarks.landmark)
+                current_knee_error = self.detect_knee_error(results.pose_landmarks.landmark)
 
-            self.history.append(current_letter)
-            if len(self.history) > self.history_buffer_size:
-                self.history.pop(0)
-
-            if self.history:
-                self.last_detected_letter = Counter(self.history).most_common(1)[0][0]
-            else:
-                self.last_detected_letter = "Brak"
-            
-            # Draw detected letter on frame
-            cv2.putText(
-                frame_copy,
-                f"Litera: {self.last_detected_letter}",
-                (50, 90),
-                cv2.FONT_HERSHEY_SIMPLEX,
-                1.5,
-                (0, 255, 0),
-                3,
-            )
+            # Update last_knee_error with current value (including NaN)
+            self.last_knee_error = current_knee_error
                 
-            return self.last_detected_letter, frame_copy
+            return current_knee_error, frame_copy
         except Exception as e:
             print(f"[POSE] BŁĄD: {e}")
             import traceback
             traceback.print_exc()
-            return "Brak", frame
+            return float('nan'), frame
 
     def step(self, delta_seconds: float) -> MovementState:
         """Advance the motion model and return the current state."""
@@ -166,5 +166,5 @@ class MovementAnalyzer:
             movement_state=movement_state,
             hip_angle=hip_angle,
             repetition_detected=repetition_detected,
-            detected_letter=self.last_detected_letter,
+            knee_error=self.last_knee_error,
         )
