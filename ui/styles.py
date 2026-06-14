@@ -27,56 +27,66 @@ class StyleManager:
         style.configure("Sidebar.TFrame", background=self.config.sidebar_color)
         style.configure("Card.TFrame", background=self.config.card_color, relief="flat")
         style.configure("CardInner.TFrame", background=self.config.card_color)
+
+        # Labels
         style.configure(
             "Section.TLabel",
             background=self.config.card_color,
-            foreground="#e2e8f0",
+            foreground=self.config.text_secondary,
             font=("Segoe UI", 12, "bold"),
         )
         style.configure(
             "CardText.TLabel",
             background=self.config.card_color,
-            foreground="#cbd5e1",
+            foreground=self.config.text_secondary,
             font=("Segoe UI", 10),
         )
         style.configure(
             "Meta.TLabel",
             background=self.config.card_color,
-            foreground="#94a3b8",
+            foreground=self.config.text_muted,
             font=("Segoe UI", 9),
         )
         style.configure(
             "Title.TLabel",
             background=self.config.background_color,
-            foreground="#f8fafc",
+            foreground=self.config.text_primary,
             font=("Segoe UI", 24, "bold"),
         )
         style.configure(
             "Subtitle.TLabel",
             background=self.config.background_color,
-            foreground="#94a3b8",
+            foreground=self.config.text_muted,
             font=("Segoe UI", 10),
         )
+
+        # Chips and navigation
         style.configure(
             "Chip.TLabel",
-            background="#1e293b",
-            foreground="#e2e8f0",
+            background=self.config.chip_bg,
+            foreground=self.config.text_secondary,
             font=("Segoe UI", 9, "bold"),
             padding=(10, 4),
         )
         style.configure(
             "Nav.TButton",
             background=self.config.card_color,
-            foreground="#e2e8f0",
+            foreground=self.config.text_secondary,
             borderwidth=0,
             padding=(12, 10),
             font=("Segoe UI", 10, "bold"),
         )
+        style.map(
+            "Nav.TButton",
+            background=[("active", self.config.panel_wrapper_bg)],
+            foreground=[("active", self.config.text_primary)],
+        )
+
+        # Combobox
         style.configure(
             "CameraSelect.TCombobox",
             fieldbackground=self.config.sidebar_color,
             background=self.config.sidebar_color,
-            foreground="#e2e8f0",
+            foreground=self.config.text_secondary,
             arrowsize=14,
         )
-        style.map("Nav.TButton", background=[("active", "#1f2e4d")], foreground=[("active", "#ffffff")])

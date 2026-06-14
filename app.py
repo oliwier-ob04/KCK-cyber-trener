@@ -5,6 +5,7 @@ from __future__ import annotations
 import random
 import threading
 import time
+import math
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Sequence
@@ -15,7 +16,7 @@ from ar.renderer import FrameRenderer
 from cameras.manager import CameraManager
 from cameras.network import FrameRelayService
 from exercises.hip_thrust import ExerciseProfile, build_hip_thrust_exercise
-from pose.analyzer import MovementAnalyzer
+from pose.analyzer import MovementAnalyzer, PoseMetrics
 from scoring.engine import ScoreSnapshot, SessionScorer
 from ui.styles import StyleManager
 from ui.view import CyberTrainerView, ViewCallbacks
@@ -65,6 +66,13 @@ class CyberTrainerApp:
         self.session_paused = False
         self.session_started_at = 0.0
         self.last_tick = time.time()
+        self.session_mode = "idle"  # idle -> arming -> active -> paused
+        self.session_elapsed = 0.0
+        self._rep_anchor_elapsed: float | None = None
+        self._rep_count = 0
+        self._tempo_samples: list[float] = []
+        self._last_pose_zone = "unknown"
+        self._latest_pose_metrics = PoseMetrics(False)
         self._last_camera_scan_at = 0.0
         self._remote_frame: Image.Image | None = None
         self._remote_frame_lock = threading.Lock()
@@ -80,9 +88,10 @@ class CyberTrainerApp:
                 on_close=self._on_close,
                 on_camera_source_changed=self._on_camera_source_changed,
             ),
+            camera_only=True,
         )
         StyleManager(self.view, self.config).apply()
-        self.renderer = FrameRenderer(self.view)
+        self.renderer = FrameRenderer(self.view, config=self.config)
         self.camera = CameraManager(
             scan_max_index=self.config.camera_scan_max_index,
             slot_count=self.config.max_camera_slots,
@@ -103,6 +112,14 @@ class CyberTrainerApp:
         self._update_camera_status()
         self.view.set_feedback(self.exercise.default_feedback)
         self.view.set_metrics(self.scorer.snapshot(), self._format_elapsed())
+        self.view.set_workout_status("Gotowy", "Naciśnij Start albo unieś rękę, aby rozpocząć ustawianie pozycji startowej.")
+        self.view.set_pose_metrics(PoseMetrics(False))
+
+    def _sync_score_state(self) -> None:
+        """Keep the scorer object aligned with the controller counters."""
+
+        self.scorer.repetitions = self._rep_count
+        self.scorer.quality = max(self.config.minimum_quality, min(100, self.scorer.quality))
 
     def run(self) -> None:
         """Start background services and enter the Tk event loop."""
@@ -135,16 +152,32 @@ class CyberTrainerApp:
     def start_session(self) -> None:
         """Start a new training session if one is not already active."""
 
-        if self.session_active:
+        if self.session_mode in {"arming", "active", "paused"}:
             return
 
-        self.session_active = True
+        self._arm_session(trigger="button")
+
+    def _arm_session(self, trigger: str) -> None:
+        """Prepare a fresh series and wait for the correct start pose."""
+
+        self.session_mode = "arming"
+        self.session_active = False
         self.session_paused = False
-        self.session_started_at = time.time()
-        self.last_tick = self.session_started_at
+        self.session_started_at = 0.0
+        self.session_elapsed = 0.0
+        self.last_tick = time.time()
+        self._rep_anchor_elapsed = None
+        self._rep_count = 0
+        self._tempo_samples = []
+        self._last_pose_zone = "unknown"
         for analyzer in self.analyzers.values():
             analyzer.reset()
         self.scorer.reset()
+
+        self.view.set_workout_status("Ustaw start", "Ustaw biodro-kolano-stopa w okolicach 90° i pokaż pozycję startową.")
+        self.view.set_feedback("Ustaw pozycję startową. Kąt biodro-kolano-stopa ma być około 90°.")
+        self.view.append_event(f"Seria przygotowywana ({trigger})")
+        self._sync_score_state()
 
         self._update_camera_status()
         active_cameras = len(self.camera.available_devices)
@@ -162,26 +195,43 @@ class CyberTrainerApp:
     def toggle_pause(self) -> None:
         """Toggle the active session between paused and running."""
 
-        if not self.session_active:
-            self.view.set_feedback("Najpierw uruchom sesje.")
+        if self.session_mode == "idle":
+            self.start_session()
             return
 
-        self.session_paused = not self.session_paused
-        state = "wznowiona" if not self.session_paused else "wstrzymana"
-        self.view.set_feedback(f"Sesja {state}.")
-        self.view.append_event(f"Sesja {state}")
+        if self.session_mode == "arming":
+            self.view.set_feedback("Najpierw ustaw pozycję startową.")
+            return
+
+        if self.session_mode == "active":
+            self.session_mode = "paused"
+            self.session_paused = True
+            self.view.set_workout_status("Pauza", "Seria wstrzymana. Czas i tempo nie rosną w trakcie pauzy.")
+            self.view.set_feedback("Seria wstrzymana.")
+            self.view.append_event("Seria wstrzymana")
+            return
+
+        if self.session_mode == "paused":
+            self.session_mode = "active"
+            self.session_paused = False
+            self.last_tick = time.time()
+            self.view.set_workout_status("Aktywna", "Seria wznowiona.")
+            self.view.set_feedback("Seria wznowiona.")
+            self.view.append_event("Seria wznowiona")
 
     def end_session(self) -> None:
         """End the current session and persist the result automatically."""
 
-        if not self.session_active:
+        if self.session_mode == "idle":
             return
 
+        self.session_mode = "idle"
         self.session_active = False
         self.session_paused = False
         self.view.set_connection_status("Kamera nieaktywna")
-        self.view.set_feedback("Sesja zakonczona. Mozesz zapisac wynik lub rozpoczac nowa probe.")
-        self.view.append_event("Sesja zakonczona")
+        self.view.set_workout_status("Zakończona", "Seria zakończona. Możesz rozpocząć nową próbę.")
+        self.view.set_feedback("Seria zakończona.")
+        self.view.append_event("Seria zakończona")
         self.save_result(auto=True)
 
     def save_result(self, auto: bool = False) -> None:
@@ -279,17 +329,21 @@ class CyberTrainerApp:
             self.view.set_source_label(f"{active} cameras")
             self.view.set_connection_status("Wykryto co najmniej dwie kamery")
 
-    def _update_camera_panels(self) -> None:
+    def _update_camera_panels(self) -> PoseMetrics:
         """Render the active camera sources into the two preview panels."""
 
+        best_metrics = PoseMetrics(False)
         for slot_index in range(self.config.max_camera_slots):
             panel = self.view.get_camera_panel(slot_index)
-            max_width = max(320, panel.holder.winfo_width() or 640)
-            max_height = max(240, panel.holder.winfo_height() or 480)
+            area = getattr(panel, "inner_image_area", panel.holder)
+            max_width = max(320, area.winfo_width() or 640)
+            max_height = max(240, area.winfo_height() or 480)
             ok, frame, source_index = self.camera.read(slot_index)
             if ok and frame is not None:
                 # Analyze frame with MediaPipe for each camera independently
-                letter, frame = self.analyzers[slot_index].analyze_frame(frame)
+                metrics, frame = self.analyzers[slot_index].analyze_frame(frame)
+                if metrics.pose_detected and metrics.pose_visibility >= best_metrics.pose_visibility:
+                    best_metrics = metrics
                 
                 photo = self.renderer.frame_to_photo(frame, max_width, max_height)
                 self.view.update_camera_panel(
@@ -307,28 +361,91 @@ class CyberTrainerApp:
                     online=False,
                 )
 
-    def _update_metrics(self) -> None:
+        self._latest_pose_metrics = best_metrics
+        return best_metrics
+
+    def _update_metrics(self, pose_metrics: PoseMetrics | None = None) -> None:
         """Advance the motion analysis and refresh the visible metrics."""
 
-        if self.session_active and not self.session_paused:
-            now = time.time()
-            delta = now - self.last_tick
-            self.last_tick = now
-            movement = self.analyzers[0].step(delta)
-            snapshot = self.scorer.update(movement)
-            if movement.repetition_detected:
-                self.view.append_event(f"Wykryto powtorzenie {snapshot.repetitions}")
-            if snapshot.warning_event:
-                self.view.append_event("Ostrzezenie o technice")
-                self.view.set_feedback(snapshot.feedback)
+        pose_metrics = pose_metrics or self._latest_pose_metrics
+        now = time.time()
+        delta = now - self.last_tick
+        self.last_tick = now
+
+        if self.session_mode == "active":
+            self.session_elapsed += delta
+
+        self.view.set_pose_metrics(pose_metrics)
+
+        if self.session_mode == "idle":
+            if pose_metrics.hand_raised:
+                self._arm_session(trigger="gesture")
+            else:
+                self.view.set_workout_status("Gotowy", "Naciśnij Start albo unieś rękę, aby rozpocząć ustawianie pozycji startowej.")
+
+        elif self.session_mode == "arming":
+            self.view.set_workout_status("Ustaw start", pose_metrics.message)
+            self.view.set_feedback(pose_metrics.message)
+            if pose_metrics.bottom_ready:
+                self.session_mode = "active"
+                self.session_active = True
+                self.session_started_at = now
+                self.session_elapsed = 0.0
+                self.last_tick = now
+                self._rep_anchor_elapsed = 0.0
+                self._last_pose_zone = "bottom"
+                self.view.set_workout_status("Aktywna", "Zaczynamy! Liczenie powtórzeń i czasu jest uruchomione.")
+                self.view.set_feedback("Zaczynamy!")
+                self.view.append_event("Zaczynamy")
+
+        elif self.session_mode == "paused":
+            self.view.set_workout_status("Pauza", "Seria wstrzymana. Czas i tempo nie są liczone.")
+
+        elif self.session_mode == "active":
+            zone = "top" if pose_metrics.top_ready else "bottom" if pose_metrics.bottom_ready else "mid"
+            self.view.set_workout_status("Aktywna", pose_metrics.message)
+
+            if pose_metrics.bottom_ready:
+                self._rep_anchor_elapsed = self.session_elapsed
+
+            if zone == "top" and self._last_pose_zone != "top":
+                if self._rep_anchor_elapsed is not None:
+                    rep_duration = max(0.01, self.session_elapsed - self._rep_anchor_elapsed)
+                    self._rep_count += 1
+                    self._tempo_samples.append(rep_duration)
+                    self.scorer.repetitions = self._rep_count
+                    self.scorer.feedback = f"Powtórzenie {self._rep_count} | tempo {rep_duration:.2f} s"
+                    self.view.append_event(f"Powtórzenie {self._rep_count} | tempo {rep_duration:.2f} s")
+                    self.view.set_feedback(self.scorer.feedback)
+                self._rep_anchor_elapsed = None
+
+            self._last_pose_zone = zone
+
+        if self._tempo_samples:
+            avg_tempo = sum(self._tempo_samples) / len(self._tempo_samples)
+            current_tempo = self._tempo_samples[-1]
         else:
-            snapshot = self.scorer.snapshot()
+            avg_tempo = 0.0
+            current_tempo = 0.0
 
+        quality = 100
+        if not pose_metrics.pose_detected:
+            quality -= 10
+        elif pose_metrics.knee_error is not None and not math.isnan(pose_metrics.knee_error):
+            quality -= int((1.0 - pose_metrics.knee_error) * 10)
+
+        self.scorer.warnings = max(0, self.scorer.warnings)
+        self.scorer.quality = max(self.config.minimum_quality, min(100, quality))
+        self._sync_score_state()
+        snapshot = self.scorer.snapshot()
         self.view.set_metrics(snapshot, self._format_elapsed())
-        self.view.set_knee_error(self.analyzers[0].last_knee_error)
-
-        if snapshot.repetitions and snapshot.repetitions % 5 == 0:
-            self.view.set_feedback("Dobra praca: utrzymano poprawny zakres ruchu.")
+        self.view.set_workout_counters(
+            elapsed_text=self._format_elapsed(),
+            current_tempo=f"{current_tempo:.2f} s" if current_tempo else "--",
+            avg_tempo=f"{avg_tempo:.2f} s" if avg_tempo else "--",
+            reps=self._rep_count,
+        )
+        self.view.set_knee_error(pose_metrics.knee_error)
 
     def _format_elapsed(self) -> str:
         """Return the formatted elapsed session time."""
@@ -341,8 +458,8 @@ class CyberTrainerApp:
     def _update_loop(self) -> None:
         """Run one UI tick and reschedule the next frame."""
 
-        self._update_metrics()
-        self._update_camera_panels()
+        pose_metrics = self._update_camera_panels()
+        self._update_metrics(pose_metrics)
         self.view.after(self.config.update_interval_ms, self._update_loop)
 
     def _on_close(self) -> None:

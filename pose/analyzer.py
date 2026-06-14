@@ -3,11 +3,29 @@
 from __future__ import annotations
 
 import math
+import statistics
 from dataclasses import dataclass
 
 import cv2
 import mediapipe as mp
 import numpy as np
+
+
+@dataclass(frozen=True)
+class PoseMetrics:
+    """Measured pose state extracted from the current frame."""
+
+    pose_detected: bool
+    side: str = "unknown"
+    knee_angle: float = float("nan")
+    upper_body_angle: float = float("nan")
+    hand_raised: bool = False
+    start_ready: bool = False
+    top_ready: bool = False
+    bottom_ready: bool = False
+    pose_visibility: float = 0.0
+    knee_error: float = float("nan")
+    message: str = "Brak wykrytej sylwetki"
 
 
 @dataclass(frozen=True)
@@ -48,78 +66,145 @@ class MovementAnalyzer:
         
         self.reset()
 
+    @staticmethod
+    def _angle(a, b, c, use_z: bool = False) -> float:
+        """Return the angle ABC in degrees.
+        
+        Args:
+            a, b, c: Landmarks (b is the vertex)
+            use_z: If False, uses 2D (X,Y) only (for side-view). 
+                   If True, uses 3D (X,Y,Z) for depth-aware calculation.
+        """
+
+        if use_z:
+            ab = np.array([a.x - b.x, a.y - b.y, getattr(a, "z", 0.0) - getattr(b, "z", 0.0)], dtype=float)
+            cb = np.array([c.x - b.x, c.y - b.y, getattr(c, "z", 0.0) - getattr(b, "z", 0.0)], dtype=float)
+        else:
+            # For side-view, use only 2D coordinates to avoid Z distortion
+            ab = np.array([a.x - b.x, a.y - b.y], dtype=float)
+            cb = np.array([c.x - b.x, c.y - b.y], dtype=float)
+        
+        ab_len = np.linalg.norm(ab)
+        cb_len = np.linalg.norm(cb)
+        if ab_len == 0 or cb_len == 0:
+            return float("nan")
+
+        cosine = float(np.dot(ab, cb) / (ab_len * cb_len))
+        cosine = max(-1.0, min(1.0, cosine))
+        raw_angle = math.degrees(math.acos(cosine))
+        return raw_angle
+
+    @staticmethod
+    def _normalize_view_angle(angle: float, target: float, tolerance: float = 35.0) -> float:
+        """Apply minimal smoothing/correction to measured angle.
+        
+        With proper 2D calculation, angles should be nearly accurate.
+        Only apply small corrections for edge cases.
+        """
+
+        if math.isnan(angle):
+            return angle
+        
+        if abs(target - 90.0) < 1e-6:
+            # For 90° target, apply very minimal correction
+            if angle < 50.0:
+                return angle + 5.0
+            elif angle > 130.0:
+                return angle - 5.0
+            return angle
+        
+        if abs(target - 180.0) < 1e-6:
+            # For 180° target, apply very minimal correction
+            if angle < 160.0:
+                return angle + 3.0
+            return angle
+        
+        return angle
+
     def reset(self) -> None:
         """Reset the internal state before a new session."""
 
         self.current_phase = 0.0
         self._previous_state = "OPUSZCZANIE"
         self.history = []
+        self._knee_angle_history: list[float] = []
+        self._upper_angle_history: list[float] = []
         self.last_knee_error = float('nan')
+        self.last_pose_metrics = PoseMetrics(False, "unknown")
+
+    def _smooth_angle(self, history: list[float], angle: float) -> float:
+        """Smooth angle readings with a short median filter."""
+
+        if math.isnan(angle):
+            return angle
+        history.append(angle)
+        if len(history) > self.history_buffer_size:
+            del history[0]
+        if len(history) == 1:
+            return angle
+        return float(statistics.median(history))
 
     def detect_knee_error(self, lm) -> float:
         """
-        Detect knee alignment error based on whether the legs are parallel.
-        Measures the angle between leg vectors (from knee to ankle).
-        Returns percentage: 100% = perfectly parallel (0°), decreases with angle.
-        Returns NaN if legs not visible.
+        Detect knee stability on the most visible leg.
+
+        In a side view, the hidden leg is often hallucinated by MediaPipe, which makes
+        comparing both calves noisy. We therefore use the better visible leg and measure
+        how close the shin vector is to vertical.
+
+        Returns percentage: 100% = shin aligned with vertical, decreases with tilt.
+        Returns NaN if no leg is visible enough.
         """
         
         if not lm:
             return float('nan')
             
         try:
-            # Get knee and ankle landmarks
-            l_knee = lm[self.mp_pose.PoseLandmark.LEFT_KNEE]
-            l_ankle = lm[self.mp_pose.PoseLandmark.LEFT_ANKLE]
-            r_knee = lm[self.mp_pose.PoseLandmark.RIGHT_KNEE]
-            r_ankle = lm[self.mp_pose.PoseLandmark.RIGHT_ANKLE]
-            
-            # Check visibility threshold - if landmarks not visible enough, return NaN
+            candidates = (
+                (
+                    lm[self.mp_pose.PoseLandmark.LEFT_KNEE],
+                    lm[self.mp_pose.PoseLandmark.LEFT_ANKLE],
+                ),
+                (
+                    lm[self.mp_pose.PoseLandmark.RIGHT_KNEE],
+                    lm[self.mp_pose.PoseLandmark.RIGHT_ANKLE],
+                ),
+            )
+
             visibility_threshold = 0.5
-            if (l_knee.visibility < visibility_threshold or 
-                l_ankle.visibility < visibility_threshold or
-                r_knee.visibility < visibility_threshold or
-                r_ankle.visibility < visibility_threshold):
+            best_candidate = None
+            best_visibility = visibility_threshold
+            for knee, ankle in candidates:
+                leg_visibility = min(knee.visibility, ankle.visibility)
+                if leg_visibility > best_visibility:
+                    best_visibility = leg_visibility
+                    best_candidate = (knee, ankle)
+
+            if best_candidate is None:
                 return float('nan')
-            
-            # Create vectors for each leg (from knee to ankle)
-            left_vector = (l_ankle.x - l_knee.x, l_ankle.y - l_knee.y)
-            right_vector = (r_ankle.x - r_knee.x, r_ankle.y - r_knee.y)
-            
-            # Calculate vector lengths
-            left_length = math.sqrt(left_vector[0]**2 + left_vector[1]**2)
-            right_length = math.sqrt(right_vector[0]**2 + right_vector[1]**2)
-            
-            if left_length == 0 or right_length == 0:
+
+            knee, ankle = best_candidate
+            shin_vector = (ankle.x - knee.x, ankle.y - knee.y)
+            shin_length = math.sqrt(shin_vector[0] ** 2 + shin_vector[1] ** 2)
+            if shin_length == 0:
                 return float('nan')
-            
-            # Calculate dot product
-            dot_product = left_vector[0] * right_vector[0] + left_vector[1] * right_vector[1]
-            
-            # Calculate cosine of angle between vectors
-            cos_angle = dot_product / (left_length * right_length)
-            
-            # Clamp to [-1, 1] to avoid numerical errors
-            cos_angle = max(-1.0, min(1.0, cos_angle))
-            
-            # Calculate angle in degrees
-            angle_rad = math.acos(abs(cos_angle))
-            angle_deg = math.degrees(angle_rad)
-            
-            # Convert to percentage: 100% at 0°, decreases with angle
-            # Each degree of difference reduces the score by 1%
-            score = max(0, 100 - angle_deg)
-            
+
+            vertical_cos = abs(shin_vector[1] / shin_length)
+            vertical_cos = max(-1.0, min(1.0, vertical_cos))
+            angle_deg = math.degrees(math.acos(vertical_cos))
+
+            score = max(0.0, 100.0 - angle_deg)
             return score / 100.0  # Return as 0-1 range
             
         except Exception:
             return float('nan')
 
-    def analyze_frame(self, frame) -> tuple[float, any]:
-        """Process a video frame, draw landmarks and return knee error percentage and modified frame."""
+    def analyze_frame(self, frame) -> tuple[PoseMetrics, any]:
+        """Process a video frame, draw landmarks and return pose metrics plus modified frame."""
         
         if frame is None:
-            return float('nan'), frame
+            self.last_pose_metrics = PoseMetrics(False)
+            return self.last_pose_metrics, frame
             
         try:
             frame_copy = frame.copy()
@@ -127,25 +212,125 @@ class MovementAnalyzer:
             results = self.pose.process(img_rgb)
 
             current_knee_error = float('nan')
+            metrics = PoseMetrics(False)
             if results.pose_landmarks:
-                # Draw landmarks on frame
-                self.mp_drawing.draw_landmarks(
-                    frame_copy, 
-                    results.pose_landmarks, 
-                    self.mp_pose.POSE_CONNECTIONS
+                landmarks = results.pose_landmarks.landmark
+                side_candidates = []
+                for side_name, shoulder_idx, hip_idx, knee_idx, ankle_idx, wrist_idx in (
+                    (
+                        "left",
+                        self.mp_pose.PoseLandmark.LEFT_SHOULDER,
+                        self.mp_pose.PoseLandmark.LEFT_HIP,
+                        self.mp_pose.PoseLandmark.LEFT_KNEE,
+                        self.mp_pose.PoseLandmark.LEFT_ANKLE,
+                        self.mp_pose.PoseLandmark.LEFT_WRIST,
+                    ),
+                    (
+                        "right",
+                        self.mp_pose.PoseLandmark.RIGHT_SHOULDER,
+                        self.mp_pose.PoseLandmark.RIGHT_HIP,
+                        self.mp_pose.PoseLandmark.RIGHT_KNEE,
+                        self.mp_pose.PoseLandmark.RIGHT_ANKLE,
+                        self.mp_pose.PoseLandmark.RIGHT_WRIST,
+                    ),
+                ):
+                    shoulder = landmarks[shoulder_idx]
+                    hip = landmarks[hip_idx]
+                    knee = landmarks[knee_idx]
+                    ankle = landmarks[ankle_idx]
+                    wrist = landmarks[wrist_idx]
+                    visibility = (shoulder.visibility + hip.visibility + knee.visibility + ankle.visibility) / 4.0
+                    side_candidates.append((visibility, side_name, shoulder, hip, knee, ankle, wrist))
+
+                visibility, side_name, shoulder, hip, knee, ankle, wrist = max(side_candidates, key=lambda item: item[0])
+
+                raw_knee_angle = self._normalize_view_angle(self._angle(hip, knee, ankle, use_z=False), 90.0)
+                raw_upper_angle = self._normalize_view_angle(self._angle(shoulder, hip, knee, use_z=False), 180.0)
+                knee_angle = self._smooth_angle(self._knee_angle_history, raw_knee_angle)
+                upper_body_angle = self._smooth_angle(self._upper_angle_history, raw_upper_angle)
+                hand_raised = False
+                if shoulder.visibility > 0.4 and wrist.visibility > 0.4:
+                    hand_raised = wrist.y < shoulder.y - 0.05
+
+                current_knee_error = self.detect_knee_error(landmarks)
+                bottom_ready = not math.isnan(knee_angle) and 87.0 <= knee_angle <= 95.0 and not math.isnan(upper_body_angle) and upper_body_angle < 160.0
+                top_ready = not math.isnan(upper_body_angle) and 170.0 <= upper_body_angle <= 183.0
+                if top_ready:
+                    message = "Pozycja górna: biodra na wysokości pleców"
+                elif bottom_ready:
+                    message = "Pozycja startowa: ustaw biodro-kolano-stopa ~90°"
+                else:
+                    message = "Ustaw pozycję startową lub unieś biodra wyżej"
+                metrics = PoseMetrics(
+                    pose_detected=True,
+                    side=side_name,
+                    knee_angle=knee_angle,
+                    upper_body_angle=upper_body_angle,
+                    hand_raised=hand_raised,
+                    start_ready=not math.isnan(knee_angle) and 87.0 <= knee_angle <= 95.0,
+                    top_ready=top_ready,
+                    bottom_ready=bottom_ready,
+                    pose_visibility=visibility,
+                    knee_error=current_knee_error,
+                    message=message,
                 )
-                
-                current_knee_error = self.detect_knee_error(results.pose_landmarks.landmark)
 
             # Update last_knee_error with current value (including NaN)
             self.last_knee_error = current_knee_error
+            self.last_pose_metrics = metrics
+
+            # Draw only the key lines we care about instead of the full landmark mesh.
+            if results.pose_landmarks:
+                self._draw_key_overlay(frame_copy, metrics, landmarks)
                 
-            return current_knee_error, frame_copy
+            return metrics, frame_copy
         except Exception as e:
             print(f"[POSE] BŁĄD: {e}")
             import traceback
             traceback.print_exc()
-            return float('nan'), frame
+            self.last_pose_metrics = PoseMetrics(False)
+            return self.last_pose_metrics, frame
+
+    def _draw_key_overlay(self, frame, metrics: PoseMetrics, landmarks) -> None:
+        """Draw only the important pose lines and angle markers."""
+
+        try:
+            h, w = frame.shape[:2]
+
+            def pt(lm):
+                return (int(lm.x * w), int(lm.y * h))
+
+            color_body = (255, 255, 255)
+            color_knee = (0, 255, 255)
+            color_top = (0, 200, 255)
+            color_joint = (0, 0, 255)
+
+            if metrics.side == "left":
+                shoulder = landmarks[self.mp_pose.PoseLandmark.LEFT_SHOULDER]
+                hip = landmarks[self.mp_pose.PoseLandmark.LEFT_HIP]
+                knee = landmarks[self.mp_pose.PoseLandmark.LEFT_KNEE]
+                ankle = landmarks[self.mp_pose.PoseLandmark.LEFT_ANKLE]
+                wrist = landmarks[self.mp_pose.PoseLandmark.LEFT_WRIST]
+            else:
+                shoulder = landmarks[self.mp_pose.PoseLandmark.RIGHT_SHOULDER]
+                hip = landmarks[self.mp_pose.PoseLandmark.RIGHT_HIP]
+                knee = landmarks[self.mp_pose.PoseLandmark.RIGHT_KNEE]
+                ankle = landmarks[self.mp_pose.PoseLandmark.RIGHT_ANKLE]
+                wrist = landmarks[self.mp_pose.PoseLandmark.RIGHT_WRIST]
+
+            # key skeleton: shoulder-hip-knee-ankle and a single arm reference
+            cv2.line(frame, pt(shoulder), pt(hip), color_body, 2)
+            cv2.line(frame, pt(hip), pt(knee), color_knee, 4)
+            cv2.line(frame, pt(knee), pt(ankle), color_knee, 4)
+            cv2.circle(frame, pt(hip), 5, color_joint, -1)
+            cv2.circle(frame, pt(knee), 5, color_joint, -1)
+            cv2.circle(frame, pt(ankle), 4, color_joint, -1)
+
+            if metrics.hand_raised:
+                cv2.line(frame, pt(shoulder), pt(wrist), color_top, 2)
+                cv2.circle(frame, pt(wrist), 4, color_top, -1)
+        except Exception:
+            pass
 
     def step(self, delta_seconds: float) -> MovementState:
         """Advance the motion model and return the current state."""
