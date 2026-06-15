@@ -198,6 +198,78 @@ class MovementAnalyzer:
             
         except Exception:
             return float('nan')
+        
+    def _analyze_front_view(self, frame, landmarks) -> PoseMetrics:
+        """Analizuje widok od frontu pod kątem równoległości łydek (kolana-kostki)."""
+        h, w = frame.shape[:2]
+
+        # Pobieramy punkty kluczowe dla obu łydek
+        left_knee = landmarks[self.mp_pose.PoseLandmark.LEFT_KNEE]
+        left_ankle = landmarks[self.mp_pose.PoseLandmark.LEFT_ANKLE]
+        right_knee = landmarks[self.mp_pose.PoseLandmark.RIGHT_KNEE]
+        right_ankle = landmarks[self.mp_pose.PoseLandmark.RIGHT_ANKLE]
+
+        # Sprawdzamy widoczność punktów dolnej partii ciała
+        min_vis = 0.5
+        if (left_knee.visibility < min_vis or left_ankle.visibility < min_vis or
+            right_knee.visibility < min_vis or right_ankle.visibility < min_vis):
+            return PoseMetrics(
+                pose_detected=True,
+                side="front",
+                knee_error=float('nan'),
+                message="FRONT: Cofnij się, aby było widać całe nogi"
+            )
+
+        # 1. Obliczamy kąt nachylenia lewej łydki (w stopniach) względem osi Y (pionu)
+        # math.atan2(dx, dy) zwraca kąt w radianach
+        left_calf_angle = math.degrees(math.atan2(left_ankle.x - left_knee.x, left_ankle.y - left_knee.y))
+        
+        # 2. Obliczamy kąt nachylenia prawej łydki względem osi Y
+        right_calf_angle = math.degrees(math.atan2(right_ankle.x - right_knee.x, right_ankle.y - right_knee.y))
+
+        # 3. Różnica między kątami mówi nam, jak bardzo łydki odchylają się od równoległości
+        # Stosujemy abs(), ponieważ nie interesuje nas, w którą stronę jest odchylenie
+        angle_diff = abs(left_calf_angle - right_calf_angle)
+
+        # 4. Mapujemy to na wskaźnik błędu kolan (knee_error) w skali 0.0 do 1.0
+        # Załóżmy, że idealnie równoległe to 0 stopni różnicy (knee_error = 1.0 - wszystko super)
+        # A limit tolerancji to np. 12 stopni różnicy (powyżej tego kolana bardzo schodzą się lub rozchodzą)
+        max_allowable_diff = 12.0
+        
+        # Obliczamy stabilność (1.0 = idealnie równolegle, 0.0 = maksymalny błąd)
+        stability_score = max(0.0, min(1.0, 1.0 - (angle_diff / max_allowable_diff)))
+
+        # Definiujemy próg błędu (np. jeśli stabilność spada poniżej 75%, to mamy błąd)
+        has_error = stability_score < 0.75
+        
+        # Dobieramy kolor linii AR w zależności od wyniku
+        line_color = (34, 197, 94) if not has_error else (59, 68, 239) # Zielony (RGB/BGR) vs Czerwony
+        message = "FRONT: Kolana stabilne (lydki rownolegle)" if not has_error else "FRONT: UWAGA! Kolana uciekaja!"
+
+        # --- RYSOWANIE LINII ŁYDEK DLA WIDOKU Z PRZODU ---
+        def pt(lm):
+            return (int(lm.x * w), int(lm.y * h))
+
+        # Rysujemy grubszą linię dla lewej i prawej łydki
+        cv2.line(frame, pt(left_knee), pt(left_ankle), line_color, 4)
+        cv2.line(frame, pt(right_knee), pt(right_ankle), line_color, 4)
+        
+        # Zaznaczamy stawy kropkami
+        cv2.circle(frame, pt(left_knee), 6, (0, 0, 255), -1)
+        cv2.circle(frame, pt(left_ankle), 6, (0, 0, 255), -1)
+        cv2.circle(frame, pt(right_knee), 6, (0, 0, 255), -1)
+        cv2.circle(frame, pt(right_ankle), 6, (0, 0, 255), -1)
+
+        # Wypisujemy kąt różnicy na ekranie w celach debugowania
+        cv2.putText(frame, f"Roznica: {angle_diff:.1f}*", (50, 90), 
+                    cv2.FONT_HERSHEY_SIMPLEX, 0.7, line_color, 2)
+
+        return PoseMetrics(
+            pose_detected=True,
+            side="front",
+            knee_error=stability_score, # Zwracamy wartość stabilności do głównej pętli
+            message=message
+        )
 
     def analyze_frame(self, frame) -> tuple[PoseMetrics, any]:
         """Process a video frame, draw landmarks and return pose metrics plus modified frame."""
@@ -211,7 +283,6 @@ class MovementAnalyzer:
             img_rgb = cv2.cvtColor(frame_copy, cv2.COLOR_BGR2RGB)
             results = self.pose.process(img_rgb)
 
-            current_knee_error = float('nan')
             metrics = PoseMetrics(False)
             if results.pose_landmarks:
                 landmarks = results.pose_landmarks.landmark
@@ -242,54 +313,65 @@ class MovementAnalyzer:
                     visibility = (shoulder.visibility + hip.visibility + knee.visibility + ankle.visibility) / 4.0
                     side_candidates.append((visibility, side_name, shoulder, hip, knee, ankle, wrist))
 
+                # Wybór dominującej strony i obliczenie widoczności
                 visibility, side_name, shoulder, hip, knee, ankle, wrist = max(side_candidates, key=lambda item: item[0])
                 left_vis = side_candidates[0][0]
                 right_vis = side_candidates[1][0]
+
+                # Detekcja czy to jest FRONT
                 if abs(left_vis - right_vis) < 0.15:
                     side_name = "front"
-            
-            
-                raw_knee_angle = self._normalize_view_angle(self._angle(hip, knee, ankle, use_z=False), 90.0)
-                raw_upper_angle = self._normalize_view_angle(self._angle(shoulder, hip, knee, use_z=False), 180.0)
-                knee_angle = self._smooth_angle(self._knee_angle_history, raw_knee_angle)
-                upper_body_angle = self._smooth_angle(self._upper_angle_history, raw_upper_angle)
-                hand_raised = False
-                if shoulder.visibility > 0.4 and wrist.visibility > 0.4:
-                    hand_raised = wrist.y < shoulder.y - 0.05
 
-                
-                current_knee_error = self.detect_knee_error(landmarks)
-                bottom_ready = not math.isnan(knee_angle) and 87.0 <= knee_angle <= 95.0 and not math.isnan(upper_body_angle) and upper_body_angle < 160.0
-                top_ready = not math.isnan(upper_body_angle) and 170.0 <= upper_body_angle <= 183.0
-                if top_ready:
-                    message = "Pozycja górna: biodra na wysokości pleców"
-                elif bottom_ready:
-                    message = "Pozycja startowa: ustaw biodro-kolano-stopa ~90°"
+                if side_name == "front":
+                    # Wywołanie nowej, pustej funkcji dla widoku z przodu
+                    metrics = self._analyze_front_view(frame_copy, landmarks)
+                    current_knee_error = metrics.knee_error
                 else:
-                    message = "Ustaw pozycję startową lub unieś biodra wyżej"
-                metrics = PoseMetrics(
-                    pose_detected=True,
-                    side=side_name,
-                    knee_angle=knee_angle,
-                    upper_body_angle=upper_body_angle,
-                    hand_raised=hand_raised,
-                    start_ready=not math.isnan(knee_angle) and 87.0 <= knee_angle <= 95.0,
-                    top_ready=top_ready,
-                    bottom_ready=bottom_ready,
-                    pose_visibility=visibility,
-                    knee_error=current_knee_error,
-                    message=message,
-                )
+                    # Dotychczasowa logika dla widoku z boku (left / right)
+                    raw_knee_angle = self._normalize_view_angle(self._angle(hip, knee, ankle, use_z=False), 90.0)
+                    raw_upper_angle = self._normalize_view_angle(self._angle(shoulder, hip, knee, use_z=False), 180.0)
+                    knee_angle = self._smooth_angle(self._knee_angle_history, raw_knee_angle)
+                    upper_body_angle = self._smooth_angle(self._upper_angle_history, raw_upper_angle)
+                    
+                    hand_raised = False
+                    if shoulder.visibility > 0.4 and wrist.visibility > 0.4:
+                        hand_raised = wrist.y < shoulder.y - 0.05
 
-            # Update last_knee_error with current value (including NaN)
+                    current_knee_error = self.detect_knee_error(landmarks)
+                    bottom_ready = not math.isnan(knee_angle) and 87.0 <= knee_angle <= 95.0 and not math.isnan(upper_body_angle) and upper_body_angle < 160.0
+                    top_ready = not math.isnan(upper_body_angle) and 170.0 <= upper_body_angle <= 183.0
+                    
+                    if top_ready:
+                        message = "Pozycja górna: biodra na wysokości pleców"
+                    elif bottom_ready:
+                        message = "Pozycja startowa: ustaw biodro-kolano-stopa ~90°"
+                    else:
+                        message = "Ustaw pozycję startową lub unieś biodra wyżej"
+                    
+                    metrics = PoseMetrics(
+                        pose_detected=True,
+                        side=side_name,
+                        knee_angle=knee_angle,
+                        upper_body_angle=upper_body_angle,
+                        hand_raised=hand_raised,
+                        start_ready=not math.isnan(knee_angle) and 87.0 <= knee_angle <= 95.0,
+                        top_ready=top_ready,
+                        bottom_ready=bottom_ready,
+                        pose_visibility=visibility,
+                        knee_error=current_knee_error,
+                        message=message,
+                    )
+
+            # Przypisanie ostatnich wartości globalnych dla analizatora
             self.last_knee_error = current_knee_error
             self.last_pose_metrics = metrics
 
-            # Draw only the key lines we care about instead of the full landmark mesh.
+            # Rysowanie nakładki na obraz (przekazujemy metrics, które wie czy jest front czy side)
             if results.pose_landmarks:
                 self._draw_key_overlay(frame_copy, metrics, landmarks)
                 
             return metrics, frame_copy
+            
         except Exception as e:
             print(f"[POSE] BŁĄD: {e}")
             import traceback
