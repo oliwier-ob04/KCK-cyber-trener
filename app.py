@@ -36,7 +36,6 @@ class HistoryEntry:
 
     def format(self) -> str:
         """Render the history entry as a compact one-line label."""
-
         return (
             f"{self.repetitions:02d} powt. | {self.duration_seconds}s | "
             f"{self.quality}% | {self.source}"
@@ -48,7 +47,6 @@ class CyberTrainerApp:
 
     def __init__(self, config: AppConfig | None = None) -> None:
         """Build the application with injectable defaults."""
-
         self.config = config or build_default_config()
         self.exercise: ExerciseProfile = build_hip_thrust_exercise()
         self.store = SessionStore(self.config.history_file)
@@ -76,7 +74,7 @@ class CyberTrainerApp:
         self._remote_frame: Image.Image | None = None
         self._remote_frame_lock = threading.Lock()
 
-        # --- Zmienne nowej maszyny stanów i kalkulatora jakości powtórzeń ---
+        # --- Zmienne maszyny stanów i kalkulatora jakości powtórzeń ---
         self._rep_state = "START"  # START -> GOING_UP -> TOP_HOLDING -> LOCK_REQUIRE_DOWN
         self._top_hold_started_at: float | None = None
         self._rep_started_elapsed = 0.0
@@ -125,20 +123,18 @@ class CyberTrainerApp:
 
     def _sync_score_state(self) -> None:
         """Keep the scorer object aligned with the controller counters."""
-
         self.scorer.repetitions = self._rep_count
         self.scorer.quality = max(self.config.minimum_quality, min(100, self._last_calculated_quality))
 
     def run(self) -> None:
         """Start background services and enter the Tk event loop."""
-
         self.camera.refresh_devices()
         for slot_index, device_id in enumerate(self.camera.available_devices):
             if slot_index < self.config.max_camera_slots:
                 self.camera.switch_camera(slot_index, device_id)
         self.transport.start()
         self.camera.start()
-        for i in range(50):
+        for _ in range(50):
             any_frame_available = False
             for slot_idx in range(self.config.max_camera_slots):
                 ok, frame, _ = self.camera.read(slot_idx)
@@ -153,15 +149,12 @@ class CyberTrainerApp:
 
     def start_session(self) -> None:
         """Start a new training session if one is not already active."""
-
         if self.session_mode in {"arming", "active", "paused"}:
             return
-
         self._arm_session(trigger="button")
 
     def _arm_session(self, trigger: str) -> None:
         """Prepare a fresh series and wait for the correct start pose."""
-
         self.session_mode = "arming"
         self.session_active = False
         self.session_paused = False
@@ -194,9 +187,7 @@ class CyberTrainerApp:
         self._update_camera_status()
         active_cameras = len(self.camera.available_devices)
         if active_cameras == 0:
-            self.view.set_feedback(
-                "Sesja uruchomiona bez aktywnej kamery. Panele pozostana czarne do czasu wykrycia urzadzenia."
-            )
+            self.view.set_feedback("Sesja uruchomiona bez aktywnej kamery. Panele pozostana czarne do czasu wykrycia urzadzenia.")
         elif active_cameras == 1:
             self.view.set_feedback("Sesja uruchomiona. Jedna kamera jest aktywna, drugi panel pozostanie czarny.")
         else:
@@ -206,7 +197,6 @@ class CyberTrainerApp:
 
     def toggle_pause(self) -> None:
         """Toggle the active session between paused and running."""
-
         if self.session_mode == "idle":
             self.start_session()
             return
@@ -233,7 +223,6 @@ class CyberTrainerApp:
 
     def end_session(self) -> None:
         """End the current session and persist the result automatically."""
-
         if self.session_mode == "idle":
             return
 
@@ -248,7 +237,6 @@ class CyberTrainerApp:
 
     def save_result(self, auto: bool = False) -> None:
         """Persist the current session snapshot in the local JSON history."""
-
         if not self.session_started_at:
             return
 
@@ -274,7 +262,6 @@ class CyberTrainerApp:
 
     def _on_camera_source_changed(self, slot_index: int, source_label: str) -> None:
         """Update the camera slot assignment after a combobox change."""
-
         self.camera.set_slot_source(slot_index, self.camera.parse_source(source_label))
         self.view.set_camera_sources(
             self.camera.source_options(),
@@ -283,19 +270,16 @@ class CyberTrainerApp:
 
     def _store_remote_frame(self, image: Image.Image) -> None:
         """Cache the latest remote image received over the network."""
-
         with self._remote_frame_lock:
             self._remote_frame = image
 
     def _get_remote_frame(self) -> Image.Image | None:
         """Return the latest network image for the remote camera source."""
-
         with self._remote_frame_lock:
             return self._remote_frame
 
     def _load_history(self) -> None:
         """Load the local history file and refresh the sidebar list."""
-
         items = self.store.load()
         entries = [
             HistoryEntry(
@@ -310,7 +294,6 @@ class CyberTrainerApp:
 
     def _refresh_camera_sources(self, force: bool = False) -> None:
         """Rescan local devices and keep the UI comboboxes in sync."""
-
         now = time.time()
         if not force and self.camera.available_devices:
             return
@@ -324,7 +307,6 @@ class CyberTrainerApp:
 
     def _update_camera_status(self) -> None:
         """Update the sidebar status text based on available devices."""
-
         if not self.camera.available:
             self.view.set_source_label("Demo mode")
             self.view.set_connection_status("OpenCV nie jest dostepne - wyswietlany jest czarny ekran")
@@ -343,7 +325,6 @@ class CyberTrainerApp:
 
     def _update_camera_panels(self) -> PoseMetrics:
         """Render the active camera sources into the two preview panels."""
-
         best_metrics = PoseMetrics(False)
         for slot_index in range(self.config.max_camera_slots):
             panel = self.view.get_camera_panel(slot_index)
@@ -375,9 +356,15 @@ class CyberTrainerApp:
         self._latest_pose_metrics = best_metrics
         return best_metrics
 
+    def _handle_gesture_toggle(self) -> None:
+        """Toggle session state using the hand raise gesture."""
+        if self.session_mode == "idle":
+            self._arm_session(trigger="gesture")
+        elif self.session_mode in {"arming", "active", "paused"}:
+            self.end_session()
+
     def _update_metrics(self, pose_metrics: PoseMetrics | None = None) -> None:
         """Advance the motion analysis and refresh the visible metrics."""
-
         pose_metrics = pose_metrics or self._latest_pose_metrics
         now = time.time()
         delta = now - self.last_tick
@@ -388,33 +375,31 @@ class CyberTrainerApp:
 
         self.view.set_pose_metrics(pose_metrics)
 
-        # 1. Określenie poprawności kątów klatka po klatce (zgodnie z zielonym podświetleniem ze szkieletu)
+        # --- GESTURE TOGGLE CONTROL ---
+        if pose_metrics.pose_detected and pose_metrics.hand_raised:
+            self._handle_gesture_toggle()
+            return
+
+        # 1. Określenie poprawności kątów klatka po klatce
         hip_correct = False
         knee_correct = False
 
         if pose_metrics.pose_detected:
             if pose_metrics.side == "front":
-                # Przód: kolano zielone gdy różnica < 10.0 stopni
                 knee_correct = (pose_metrics.knee_angle_front < 10.0)
-                hip_correct = True  # z przodu nie mierzymy bocznego biodra, traktujemy jako prawidłowe
+                hip_correct = True
             else:
-                # Bok: biodro zielone w pełnym wyproście 180 +/- 5 stopni
                 hip_correct = (175.0 <= pose_metrics.upper_body_angle <= 185.0)
-                # Bok: łydka zielona w pionie 90 +/- 5 stopni
                 knee_correct = (85.0 <= pose_metrics.knee_angle_side <= 95.0)
 
-        # Obsługa stanów sesji
+        # 2. Obsługa maszyn stanów w zależności od trybu treningu
         if self.session_mode == "idle":
-            if pose_metrics.hand_raised:
-                self._arm_session(trigger="gesture")
-            else:
-                self.view.set_workout_status("Gotowy", "Naciśnij Start albo unieś rękę, aby rozpocząć ustawianie pozycji startowej.")
+            self.view.set_workout_status("Gotowy", "Naciśnij Start albo unieś rękę, aby rozpocząć ustawianie pozycji startowej.")
 
         elif self.session_mode == "arming":
             self.view.set_workout_status("Ustaw start", pose_metrics.message)
             self.view.set_feedback(pose_metrics.message)
             
-            # Przejście do treningu automatycznie po zejściu do pozycji niskiej (90-135 stopni w biodrach)
             if pose_metrics.pose_detected and pose_metrics.side != "front":
                 if 90.0 <= pose_metrics.upper_body_angle <= 135.0:
                     self.session_mode = "active"
@@ -437,7 +422,6 @@ class CyberTrainerApp:
 
                 # --- MASZYNA STANÓW POWTÓRZENIA ---
                 if self._rep_state == "START":
-                    # Rozpoczynamy od pozycji opuszczonej (biodra 90 - 135 stopni)
                     if 90.0 <= hip_angle <= 135.0:
                         self._rep_state = "GOING_UP"
                         self._rep_started_elapsed = self.session_elapsed
@@ -446,12 +430,10 @@ class CyberTrainerApp:
                         self._current_rep_knee_correct_frames = 0
 
                 elif self._rep_state == "GOING_UP":
-                    # Ruch w górę: zliczamy ramki i ich poprawność
                     self._current_rep_frames_count += 1
                     if hip_correct: self._current_rep_hip_correct_frames += 1
                     if knee_correct: self._current_rep_knee_correct_frames += 1
 
-                    # Czy osiągnięto pełny wyprost górny?
                     if 175.0 <= hip_angle <= 185.0:
                         self._rep_state = "TOP_HOLDING"
                         self._top_hold_started_at = now
@@ -461,18 +443,15 @@ class CyberTrainerApp:
                     if hip_correct: self._current_rep_hip_correct_frames += 1
                     if knee_correct: self._current_rep_knee_correct_frames += 1
 
-                    # Jeśli użytkownik spadnie z pozycji górnej przed upływem sekundy -> wraca do podnoszenia
                     if not (175.0 <= hip_angle <= 185.0):
                         self._rep_state = "GOING_UP"
                         self._top_hold_started_at = None
                     else:
-                        # Weryfikacja utrzymania pozycji przez minimum 1 sekundę
                         if self._top_hold_started_at and (now - self._top_hold_started_at) >= 1.0:
                             self._rep_count += 1
                             rep_duration = max(0.01, self.session_elapsed - self._rep_started_elapsed)
                             self._tempo_samples.append(rep_duration)
 
-                            # Wyliczanie oceny średniej z czasu powtórzenia (50% biodra, 50% kolana)
                             if self._current_rep_frames_count > 0:
                                 hip_score = (self._current_rep_hip_correct_frames / self._current_rep_frames_count) * 50.0
                                 knee_score = (self._current_rep_knee_correct_frames / self._current_rep_frames_count) * 50.0
@@ -485,15 +464,12 @@ class CyberTrainerApp:
                             self.view.append_event(msg)
                             self.view.set_feedback(msg)
 
-                            # Blokada: zaliczone, wymagamy powrotu na dół przed kolejnym powtórzeniem
                             self._rep_state = "LOCK_REQUIRE_DOWN"
 
                 elif self._rep_state == "LOCK_REQUIRE_DOWN":
-                    # Dopiero zejście bioder poniżej 135 stopni resetuje maszynę stanów do pozycji START
                     if hip_angle < 135.0:
                         self._rep_state = "START"
             else:
-                # Kontynuacja zliczania klatek jako niepoprawne w przypadku chwilowej zguby sylwetki
                 if self._rep_state in {"GOING_UP", "TOP_HOLDING"}:
                     self._current_rep_frames_count += 1
 
@@ -520,7 +496,6 @@ class CyberTrainerApp:
 
     def _format_elapsed(self) -> str:
         """Return the formatted elapsed session time."""
-
         if not self.session_started_at:
             return "00:00"
         elapsed = int(time.time() - self.session_started_at) if self.session_active else int(self.last_tick - self.session_started_at)
@@ -528,14 +503,12 @@ class CyberTrainerApp:
 
     def _update_loop(self) -> None:
         """Run one UI tick and reschedule the next frame."""
-
         pose_metrics = self._update_camera_panels()
         self._update_metrics(pose_metrics)
         self.view.after(self.config.update_interval_ms, self._update_loop)
 
     def _on_close(self) -> None:
         """Stop background services and close the window cleanly."""
-
         self.transport.stop()
         self.camera.close()
         self.view.destroy()

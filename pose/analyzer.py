@@ -3,6 +3,7 @@ from __future__ import annotations
 import math
 import statistics
 from dataclasses import dataclass
+import time
 
 import cv2
 import mediapipe as mp
@@ -67,6 +68,8 @@ class MovementAnalyzer:
         self._knee_angle_history: list[float] = []
         self._upper_angle_history: list[float] = []
         self.last_pose_metrics = PoseMetrics(False)
+        
+        self._hand_raised_start_time: float | None = None
 
     @staticmethod
     def _angle(a, b, c) -> float:
@@ -91,6 +94,21 @@ class MovementAnalyzer:
         if len(history) > self.history_buffer_size:
             del history[0]
         return float(statistics.median(history))
+    
+
+    def _check_hand_raised_duration(self, is_hand_currently_up: bool) -> bool:
+        if is_hand_currently_up:
+            if self._hand_raised_start_time is None:
+                # Użytkownik właśnie podniósł rękę – zaczynamy mierzyć czas
+                self._hand_raised_start_time = time.time()
+            
+            # Sprawdzamy, czy minęło już 5 sekund
+            elapsed = time.time() - self._hand_raised_start_time
+            return elapsed >= 5.0
+        else:
+            # Ręka opuszczona – resetujemy licznik czasu
+            self._hand_raised_start_time = None
+            return False
         
     def _analyze_front_view(self, frame, landmarks, visibility) -> PoseMetrics:
         """ANALIZA WIDOKU Z PRZODU: Wylicza różnicę kątową nachylenia łydek."""
@@ -111,10 +129,16 @@ class MovementAnalyzer:
         angle_diff = abs(left_calf_angle - right_calf_angle)
 
         # Detekcja uniesienia dłoni nad linię barków
-        hand_raised = (
+        raw_hand_raised = (
             (landmarks[self.mp_pose.PoseLandmark.LEFT_WRIST].y < landmarks[self.mp_pose.PoseLandmark.LEFT_SHOULDER].y - 0.05) or
             (landmarks[self.mp_pose.PoseLandmark.RIGHT_WRIST].y < landmarks[self.mp_pose.PoseLandmark.RIGHT_SHOULDER].y - 0.05)
         )
+        
+        if self._check_hand_raised_duration(raw_hand_raised):
+            self._hand_raised_start_time = None
+            hand_raised = True
+        else:
+            hand_raised = False
 
         # Rysowanie tekstu na obrazie
         line_color = (34, 197, 94) if angle_diff < 10.0 else (59, 68, 239)
@@ -161,7 +185,13 @@ class MovementAnalyzer:
             raw_knee_side = float("nan")
             
         knee_angle_side = self._smooth_angle(self._knee_angle_history, raw_knee_side)
-        hand_raised = shoulder.visibility > 0.4 and wrist.visibility > 0.4 and wrist.y < shoulder.y - 0.05
+        raw_hand_raised = shoulder.visibility > 0.4 and wrist.visibility > 0.4 and wrist.y < shoulder.y - 0.05
+        
+        if self._check_hand_raised_duration(raw_hand_raised):
+            self._hand_raised_start_time = None
+            hand_raised = True
+        else:
+            hand_raised = False
 
         return PoseMetrics(
             pose_detected=True,
@@ -173,6 +203,7 @@ class MovementAnalyzer:
             hand_raised=hand_raised,
             message=f"BOK ({side_name.upper()}): Analiza poprawna"
         )
+        
 
     def analyze_frame(self, frame) -> tuple[PoseMetrics, any]:
         """Główna pętla przetwarzania klatki wideo."""
@@ -268,9 +299,43 @@ class MovementAnalyzer:
                 for joint in (hip, knee, ankle):
                     cv2.circle(frame, pt(joint), 5 if joint != ankle else 4, color_joint, -1)
 
-                if metrics.hand_raised:
-                    cv2.line(frame, pt(shoulder), pt(wrist), color_top, 2)
-                    cv2.circle(frame, pt(wrist), 4, color_top, -1)
+            if self._hand_raised_start_time is not None:
+                wrist_point = pt(wrist)
+                radius = 25  # Wielkość Pacmana
+                
+                # 1. Rysowanie linii od ramienia do nadgarstka
+                cv2.line(frame, pt(shoulder), wrist_point, color_top, 2)
+                
+                # 2. Obliczenie czasu i postępu (0.0 do 1.0)
+                elapsed_time = time.time() - self._hand_raised_start_time
+                progress = min(elapsed_time / 5.0, 1.0)
+                end_angle = int(progress * 360)
+                
+                # 3. Rysowanie delikatnego szarego okręgu (tło całej tarczy zegara)
+                cv2.circle(frame, wrist_point, radius, (220, 220, 220), 1, cv2.LINE_AA)
+                
+                # 4. RYSOWANIE PACMANA (Wypełnionego wycinka koła)
+                if end_angle > 0:
+                    # Generujemy punkty na obwodzie łuku elipsy co 2 stopnie
+                    # Startujemy od -90 stopni (czyli od góry, godziny 12:00)
+                    points = [wrist_point]  # Środek koła (czubek wycinka tortu)
+                    for a in range(0, end_angle + 1, 2):
+                        # Kąt w radianach uwzględniający start od góry (-90 stopni)
+                        rad = math.radians(-90 + a)
+                        x = int(wrist_point[0] + radius * math.cos(rad))
+                        y = int(wrist_point[1] + radius * math.sin(rad))
+                        points.append((x, y))
+                    
+                    # Jeśli nie minął pełny obrót, domykamy kształt do środka, tworząc idealny wycinek
+                    if end_angle < 360:
+                        points.append(wrist_point)
+                        
+                    # Rysujemy uzyskany wielokąt jako pełną, wypełnioną bryłę (Pacmana)
+                    pts_array = np.array(points, dtype=np.int32)
+                    cv2.fillPoly(frame, [pts_array], color=color_blue_timer, lineType=cv2.LINE_AA)
+                    
+                # 5. Mała kropka centralna na środku nadgarstka
+                cv2.circle(frame, wrist_point, 4, color_top, -1)
         except Exception:
             pass
 
