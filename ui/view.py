@@ -92,10 +92,12 @@ class CyberTrainerView(tk.Tk):
         self.workout_state = tk.StringVar(value="Gotowy")
         self.workout_hint = tk.StringVar(value="Naciśnij Start albo unieś rękę, aby rozpocząć ustawianie pozycji startowej.")
         self.pose_side = tk.StringVar(value="--")
-        self.knee_angle_text = tk.StringVar(value="--")
+        
+        # Kąty kolan (przód i bok)
+        self.knee_angle_front_text = tk.StringVar(value="--")
+        self.knee_angle_side_text = tk.StringVar(value="--")
+        
         self.upper_angle_text = tk.StringVar(value="--")
-        self.pose_ready_text = tk.StringVar(value="--")
-        self.top_ready_text = tk.StringVar(value="--")
         self.rep_tempo_text = tk.StringVar(value="--")
         self.avg_tempo_text = tk.StringVar(value="--")
         self.elapsed_text = tk.StringVar(value="00:00")
@@ -136,10 +138,11 @@ class CyberTrainerView(tk.Tk):
         """Render the latest pose-derived metrics into the right-side panel."""
 
         self.pose_side.set(pose_metrics.side if pose_metrics.pose_detected else "--")
-        self.knee_angle_text.set("--" if math.isnan(pose_metrics.knee_angle) else f"{pose_metrics.knee_angle:.1f}°")
+        
+        self.knee_angle_front_text.set("--" if math.isnan(pose_metrics.knee_angle_front) else f"{pose_metrics.knee_angle_front:.1f}°")
+        self.knee_angle_side_text.set("--" if math.isnan(pose_metrics.knee_angle_side) else f"{pose_metrics.knee_angle_side:.1f}°")
+        
         self.upper_angle_text.set("--" if math.isnan(pose_metrics.upper_body_angle) else f"{pose_metrics.upper_body_angle:.1f}°")
-        self.pose_ready_text.set("TAK" if pose_metrics.bottom_ready else ("PRAWIE" if pose_metrics.start_ready else "NIE"))
-        self.top_ready_text.set("TAK" if pose_metrics.top_ready else "NIE")
         self.hand_signal_text.set("Ręka: TAK" if pose_metrics.hand_raised else "Ręka: --")
 
     def set_workout_counters(self, elapsed_text: str, current_tempo: str, avg_tempo: str, reps: int) -> None:
@@ -245,7 +248,6 @@ class CyberTrainerView(tk.Tk):
 
     def _build_ui(self) -> None:
         """Create the page shell, sidebar and cards."""
-        # Render only the camera view; all other UI components were removed.
         try:
             self.attributes("-fullscreen", True)
         except Exception:
@@ -312,16 +314,10 @@ class CyberTrainerView(tk.Tk):
         self._build_right_panel(right_panel)
 
     def _fit_camera_window(self) -> None:
-        """Resize the main window so two stacked 16:9 panels fit without horizontal bars.
-
-        Chooses the largest width that fits the screen while keeping total height
-        for two 16:9 panels within the screen height.
-        """
-        # Screen available size
+        """Resize the main window so two stacked 16:9 panels fit without horizontal bars."""
         screen_w = self.winfo_screenwidth()
         screen_h = self.winfo_screenheight()
 
-        # margins to leave for OS chrome and padding
         margin_w = 60
         margin_h = 120
 
@@ -331,18 +327,13 @@ class CyberTrainerView(tk.Tk):
         if getattr(self, "camera_only", False):
             avail_w = max(200, avail_w - self.left_panel_width - self.right_panel_width - (self.side_gap * 2))
 
-        # For two stacked 16:9 panels: total_height = 2 * (width * 9/16)
-        # So max width allowed by height: width <= avail_h * (16 / (9*2))
         width_by_height = int(avail_h * (16 / 18))
-        # Apply a small safety margin to account for paddings, borders and headers
         safety_margin = 24
         computed = min(avail_w, width_by_height) - safety_margin
         target_w = max(320, min(avail_w, computed))
 
         panel_h = int(target_w * 9 / 16)
         total_h = panel_h * 2
-
-        # Add padding used around cards/frames
         total_h += 60
 
         return target_w, total_h
@@ -354,12 +345,10 @@ class CyberTrainerView(tk.Tk):
             self.attributes("-fullscreen", self._is_fullscreen)
         except Exception:
             try:
-                # fallback to zoomed state for platforms that don't support attributes
                 self.state("zoomed" if self._is_fullscreen else "normal")
             except Exception:
                 pass
 
-        # If camera-only, recompute and apply camera container size
         if getattr(self, "camera_only", False) and hasattr(self, "_camera_container"):
             target_w, total_h = self._fit_camera_window()
             try:
@@ -575,13 +564,15 @@ class CyberTrainerView(tk.Tk):
             form_card.pack(fill="x", padx=12, pady=(0, 10))
             tk.Label(form_card, text="POZYCJA", bg="#10192c", fg="#dbe7f6", font=("Segoe UI", 10, "bold")).pack(anchor="w", padx=14, pady=(12, 2))
             tk.Label(form_card, textvariable=self.pose_side, bg="#10192c", fg="#8aa0bf", font=("Segoe UI", 9)).pack(anchor="w", padx=14)
-            tk.Label(form_card, text="Biodro-kolano-stopa", bg="#10192c", fg="#8aa0bf", font=("Segoe UI", 9)).pack(anchor="w", padx=14, pady=(6, 0))
-            tk.Label(form_card, textvariable=self.knee_angle_text, bg="#10192c", fg="#7ef0ff", font=("Segoe UI", 12, "bold")).pack(anchor="w", padx=14)
+            
+            tk.Label(form_card, text="Kolano Przód (wąsko/szeroko)", bg="#10192c", fg="#8aa0bf", font=("Segoe UI", 9)).pack(anchor="w", padx=14, pady=(6, 0))
+            tk.Label(form_card, textvariable=self.knee_angle_front_text, bg="#10192c", fg="#7ef0ff", font=("Segoe UI", 12, "bold")).pack(anchor="w", padx=14)
+            
+            tk.Label(form_card, text="Kolano Bok (zgięcie)", bg="#10192c", fg="#8aa0bf", font=("Segoe UI", 9)).pack(anchor="w", padx=14, pady=(6, 0))
+            tk.Label(form_card, textvariable=self.knee_angle_side_text, bg="#10192c", fg="#7ef0ff", font=("Segoe UI", 12, "bold")).pack(anchor="w", padx=14)
+            
             tk.Label(form_card, text="Plecy-biodro-kolano", bg="#10192c", fg="#8aa0bf", font=("Segoe UI", 9)).pack(anchor="w", padx=14, pady=(6, 0))
-            tk.Label(form_card, textvariable=self.upper_angle_text, bg="#10192c", fg="#7ef0ff", font=("Segoe UI", 12, "bold")).pack(anchor="w", padx=14)
-            tk.Label(form_card, text="Start / Góra", bg="#10192c", fg="#8aa0bf", font=("Segoe UI", 9)).pack(anchor="w", padx=14, pady=(6, 0))
-            tk.Label(form_card, textvariable=self.pose_ready_text, bg="#10192c", fg="#52f0c5", font=("Segoe UI", 10, "bold")).pack(anchor="w", padx=14)
-            tk.Label(form_card, textvariable=self.top_ready_text, bg="#10192c", fg="#52f0c5", font=("Segoe UI", 10, "bold")).pack(anchor="w", padx=14, pady=(0, 12))
+            tk.Label(form_card, textvariable=self.upper_angle_text, bg="#10192c", fg="#7ef0ff", font=("Segoe UI", 12, "bold")).pack(anchor="w", padx=14, pady=(0, 12))
 
             feedback = tk.Frame(inner, bg="#10192c", highlightthickness=1, highlightbackground="#314058", bd=0)
             feedback.pack(fill="both", expand=True, padx=12, pady=(0, 12))
@@ -626,7 +617,6 @@ class CyberTrainerView(tk.Tk):
 
     def _build_camera_card(self, parent: ttk.Frame) -> None:
         """Build the side-by-side camera preview area."""
-        # In camera-only mode we don't show the exercise title/description
         if not self.camera_only:
             ttk.Label(parent, text=self.exercise.title, style="Section.TLabel").pack(anchor="w")
             ttk.Label(
@@ -637,7 +627,6 @@ class CyberTrainerView(tk.Tk):
                 justify="left",
             ).pack(anchor="w", pady=(6, 14))
 
-        # Stack camera panels vertically: one on top of the other
         view_wrap = ttk.Frame(parent, style="Card.TFrame")
         view_wrap.pack(fill="both", expand=True)
         view_wrap.columnconfigure(0, weight=1)
@@ -654,11 +643,8 @@ class CyberTrainerView(tk.Tk):
             self._create_camera_panel(bottom_panel, "Widok 2", 1),
         ]
 
-        # Add thin edge bars overlaying top and bottom of the camera container
         bar_thick = getattr(self.config, "camera_edge_bar_thickness", 8)
-        # place bars on parent (camera card) so they overlay the stacked panels
         try:
-            # If we have a canvas container (camera_only), draw rounded bars on the canvas
             if getattr(self, "camera_only", False) and hasattr(self, "_camera_container") and isinstance(self._camera_container, tk.Canvas):
                 canvas = self._camera_container
 
@@ -666,7 +652,6 @@ class CyberTrainerView(tk.Tk):
                     w = int(canvas.winfo_width() or canvas.winfo_reqwidth() or 0)
                     h = int(canvas.winfo_height() or canvas.winfo_reqheight() or 0)
                     if w <= 0 or h <= 0:
-                        # try again shortly
                         canvas.after(50, draw_bars)
                         return
 
@@ -684,19 +669,13 @@ class CyberTrainerView(tk.Tk):
                         except Exception:
                             canvas.create_rectangle(x0, y0, x1, y1, fill=bg, outline=bg)
 
-                    # Top bar
                     rounded_rect(0, 0, w, bar_thick, min(r, bar_thick))
-                    # Bottom bar
                     rounded_rect(0, h - bar_thick, w, h, min(r, bar_thick))
-                    # Left bar
                     rounded_rect(0, 0, bar_thick, h, min(r, bar_thick))
-                    # Right bar
                     rounded_rect(w - bar_thick, 0, w, h, min(r, bar_thick))
 
-                # draw after layout
                 canvas.after(50, draw_bars)
             else:
-                # fallback to placing plain frames as overlays
                 top_bar = tk.Frame(parent, bg=self.config.panel_holder_bg, height=bar_thick)
                 top_bar.place(relx=0, rely=0, relwidth=1, anchor="nw")
                 bottom_bar = tk.Frame(parent, bg=self.config.panel_holder_bg, height=bar_thick)
@@ -706,7 +685,6 @@ class CyberTrainerView(tk.Tk):
                 right_bar = tk.Frame(parent, bg=self.config.panel_holder_bg, width=bar_thick)
                 right_bar.place(relx=1, rely=0, relheight=1, anchor="ne")
         except Exception:
-            # best-effort overlay; ignore if placement/draw fails in some environments
             pass
 
     def _create_camera_panel(self, parent: ttk.Frame, title: str, slot_index: int) -> CameraPanelWidgets:
@@ -714,15 +692,12 @@ class CyberTrainerView(tk.Tk):
         wrapper = tk.Frame(parent, bg=self.config.panel_wrapper_bg, highlightthickness=0, bd=0)
         wrapper.pack(fill="both", expand=True)
 
-        # In camera-only mode we remove the visible header to leave only the image.
-        # Create non-packed controls so other code can still reference them.
         if not self.camera_only:
             header = tk.Frame(wrapper, bg=self.config.header_bg, padx=8, pady=6)
             header.pack(fill="x", pady=(0, 8))
             tk.Label(header, text=title, bg=self.config.header_bg, fg=self.config.text_secondary, font=("Segoe UI", 12, "bold")).pack(side="left")
 
         picker_var = tk.StringVar(value="Brak")
-        # create picker either in header (visible) or as hidden child of wrapper
         picker_parent = header if (not self.camera_only) else wrapper
         picker = ttk.Combobox(
             picker_parent,
@@ -744,15 +719,12 @@ class CyberTrainerView(tk.Tk):
         holder.pack(fill="both", expand=True)
         holder.pack_propagate(False)
 
-        # Inner area that will be sized to maintain 16:9 aspect ratio
         image_area = tk.Frame(holder, bg=self.config.panel_holder_bg)
         image_area.place(relx=0.5, rely=0.5, anchor="center")
 
         def _enforce_aspect(event: tk.Event) -> None:
-            # Compute maximal 16:9 box that fits into holder
             w = event.width
             h = event.height
-            # Preferred height based on full width
             pref_h = int(w * 9 / 16)
             if pref_h <= h:
                 new_w = w
@@ -760,13 +732,11 @@ class CyberTrainerView(tk.Tk):
             else:
                 new_h = h
                 new_w = int(h * 16 / 9)
-            # place inner image area centered with computed size
             image_area.place_configure(width=new_w, height=new_h)
 
         holder.bind("<Configure>", _enforce_aspect)
 
         image_label = tk.Label(image_area, bg=self.config.panel_holder_bg, anchor="center")
-        # Fill the image_area entirely so the photo produced by renderer covers it
         image_label.place(relx=0, rely=0, relwidth=1, relheight=1)
 
         return CameraPanelWidgets(
@@ -845,7 +815,6 @@ class CyberTrainerView(tk.Tk):
             row.pack(fill="x", pady=4)
             tk.Label(row, text=row_def.label, bg=self.config.card_color, fg=self.config.text_muted, font=("Segoe UI", 10)).pack(side="left")
             
-            # Use dynamic StringVar for knees row, static text for others
             if row_def.label == "Kolana":
                 self.technique_knee_label_widget = tk.Label(
                     row, 

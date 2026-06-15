@@ -342,7 +342,7 @@ class CyberTrainerApp:
             if ok and frame is not None:
                 # Analyze frame with MediaPipe for each camera independently
                 metrics, frame = self.analyzers[slot_index].analyze_frame(frame)
-                if metrics.pose_detected and metrics.pose_visibility >= best_metrics.pose_visibility:
+                if metrics.pose_detected and metrics.visibility >= best_metrics.visibility:
                     best_metrics = metrics
                 
                 photo = self.renderer.frame_to_photo(frame, max_width, max_height)
@@ -386,7 +386,7 @@ class CyberTrainerApp:
         elif self.session_mode == "arming":
             self.view.set_workout_status("Ustaw start", pose_metrics.message)
             self.view.set_feedback(pose_metrics.message)
-            if pose_metrics.bottom_ready:
+            '''if pose_metrics.bottom_ready:
                 self.session_mode = "active"
                 self.session_active = True
                 self.session_started_at = now
@@ -396,7 +396,7 @@ class CyberTrainerApp:
                 self._last_pose_zone = "bottom"
                 self.view.set_workout_status("Aktywna", "Zaczynamy! Liczenie powtórzeń i czasu jest uruchomione.")
                 self.view.set_feedback("Zaczynamy!")
-                self.view.append_event("Zaczynamy")
+                self.view.append_event("Zaczynamy")'''
 
         elif self.session_mode == "paused":
             self.view.set_workout_status("Pauza", "Seria wstrzymana. Czas i tempo nie są liczone.")
@@ -431,8 +431,9 @@ class CyberTrainerApp:
         quality = 100
         if not pose_metrics.pose_detected:
             quality -= 10
-        elif pose_metrics.knee_error is not None and not math.isnan(pose_metrics.knee_error):
-            quality -= int((1.0 - pose_metrics.knee_error) * 10)
+        else:#if pose_metrics.knee_error is not None and not math.isnan(pose_metrics.knee_error):
+            pass
+            #quality -= int((1.0 - pose_metrics.knee_error) * 10)
 
         self.scorer.warnings = max(0, self.scorer.warnings)
         self.scorer.quality = max(self.config.minimum_quality, min(100, quality))
@@ -445,7 +446,6 @@ class CyberTrainerApp:
             avg_tempo=f"{avg_tempo:.2f} s" if avg_tempo else "--",
             reps=self._rep_count,
         )
-        self.view.set_knee_error(pose_metrics.knee_error)
 
     def _format_elapsed(self) -> str:
         """Return the formatted elapsed session time."""
