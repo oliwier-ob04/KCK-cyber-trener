@@ -46,7 +46,7 @@ class MovementAnalyzer:
     def __init__(
         self,
         phase_speed: float = 2.4,
-        repetition_threshold: float = 0.92,
+        repetition_threshold: float = 0.90,
         base_hip_angle: float = 170.0,
         hip_angle_amplitude: float = 8.0,
         history_buffer_size: int = 7,
@@ -243,7 +243,12 @@ class MovementAnalyzer:
                     side_candidates.append((visibility, side_name, shoulder, hip, knee, ankle, wrist))
 
                 visibility, side_name, shoulder, hip, knee, ankle, wrist = max(side_candidates, key=lambda item: item[0])
-
+                left_vis = side_candidates[0][0]
+                right_vis = side_candidates[1][0]
+                if abs(left_vis - right_vis) < 0.15:
+                    side_name = "front"
+            
+            
                 raw_knee_angle = self._normalize_view_angle(self._angle(hip, knee, ankle, use_z=False), 90.0)
                 raw_upper_angle = self._normalize_view_angle(self._angle(shoulder, hip, knee, use_z=False), 180.0)
                 knee_angle = self._smooth_angle(self._knee_angle_history, raw_knee_angle)
@@ -252,6 +257,7 @@ class MovementAnalyzer:
                 if shoulder.visibility > 0.4 and wrist.visibility > 0.4:
                     hand_raised = wrist.y < shoulder.y - 0.05
 
+                
                 current_knee_error = self.detect_knee_error(landmarks)
                 bottom_ready = not math.isnan(knee_angle) and 87.0 <= knee_angle <= 95.0 and not math.isnan(upper_body_angle) and upper_body_angle < 160.0
                 top_ready = not math.isnan(upper_body_angle) and 170.0 <= upper_body_angle <= 183.0
@@ -304,31 +310,68 @@ class MovementAnalyzer:
             color_knee = (0, 255, 255)
             color_top = (0, 200, 255)
             color_joint = (0, 0, 255)
+            
+            if metrics.side == "front":
+                shoulder_left = landmarks[self.mp_pose.PoseLandmark.LEFT_SHOULDER]
+                hip_left = landmarks[self.mp_pose.PoseLandmark.LEFT_HIP]
+                knee_left = landmarks[self.mp_pose.PoseLandmark.LEFT_KNEE]
+                ankle_left = landmarks[self.mp_pose.PoseLandmark.LEFT_ANKLE]
+                wrist_left = landmarks[self.mp_pose.PoseLandmark.LEFT_WRIST]
 
-            if metrics.side == "left":
-                shoulder = landmarks[self.mp_pose.PoseLandmark.LEFT_SHOULDER]
-                hip = landmarks[self.mp_pose.PoseLandmark.LEFT_HIP]
-                knee = landmarks[self.mp_pose.PoseLandmark.LEFT_KNEE]
-                ankle = landmarks[self.mp_pose.PoseLandmark.LEFT_ANKLE]
-                wrist = landmarks[self.mp_pose.PoseLandmark.LEFT_WRIST]
-            else:
-                shoulder = landmarks[self.mp_pose.PoseLandmark.RIGHT_SHOULDER]
-                hip = landmarks[self.mp_pose.PoseLandmark.RIGHT_HIP]
-                knee = landmarks[self.mp_pose.PoseLandmark.RIGHT_KNEE]
-                ankle = landmarks[self.mp_pose.PoseLandmark.RIGHT_ANKLE]
-                wrist = landmarks[self.mp_pose.PoseLandmark.RIGHT_WRIST]
+                shoulder_right = landmarks[self.mp_pose.PoseLandmark.RIGHT_SHOULDER]
+                hip_right = landmarks[self.mp_pose.PoseLandmark.RIGHT_HIP]
+                knee_right = landmarks[self.mp_pose.PoseLandmark.RIGHT_KNEE]
+                ankle_right = landmarks[self.mp_pose.PoseLandmark.RIGHT_ANKLE]
+                wrist_right = landmarks[self.mp_pose.PoseLandmark.RIGHT_WRIST]
 
-            # key skeleton: shoulder-hip-knee-ankle and a single arm reference
-            cv2.line(frame, pt(shoulder), pt(hip), color_body, 2)
-            cv2.line(frame, pt(hip), pt(knee), color_knee, 4)
-            cv2.line(frame, pt(knee), pt(ankle), color_knee, 4)
-            cv2.circle(frame, pt(hip), 5, color_joint, -1)
-            cv2.circle(frame, pt(knee), 5, color_joint, -1)
-            cv2.circle(frame, pt(ankle), 4, color_joint, -1)
+                # Draw both sides for front view
+                cv2.line(frame, pt(shoulder_left), pt(hip_left), color_body, 2)
+                cv2.line(frame, pt(hip_left), pt(knee_left), color_knee, 4)
+                cv2.line(frame, pt(knee_left), pt(ankle_left), color_knee, 4)
+                cv2.circle(frame, pt(hip_left), 5, color_joint, -1)
+                cv2.circle(frame, pt(knee_left), 5, color_joint, -1)
+                cv2.circle(frame, pt(ankle_left), 4, color_joint, -1)
 
-            if metrics.hand_raised:
-                cv2.line(frame, pt(shoulder), pt(wrist), color_top, 2)
-                cv2.circle(frame, pt(wrist), 4, color_top, -1)
+                cv2.line(frame, pt(shoulder_right), pt(hip_right), color_body, 2)
+                cv2.line(frame, pt(hip_right), pt(knee_right), color_knee, 4)
+                cv2.line(frame, pt(knee_right), pt(ankle_right), color_knee, 4)
+                cv2.circle(frame, pt(hip_right), 5, color_joint, -1)
+                cv2.circle(frame, pt(knee_right), 5, color_joint, -1)
+                cv2.circle(frame, pt(ankle_right), 4, color_joint, -1)
+
+                if metrics.hand_raised:
+                    if wrist_left.y < shoulder_left.y - 0.05:
+                        cv2.line(frame, pt(shoulder_left), pt(wrist_left), color_top, 2)
+                        cv2.circle(frame, pt(wrist_left), 4, color_top, -1)
+                    if wrist_right.y < shoulder_right.y - 0.05:
+                        cv2.line(frame, pt(shoulder_right), pt(wrist_right), color_top, 2)
+                        cv2.circle(frame, pt(wrist_right), 4, color_top, -1)
+            else:          
+                if metrics.side == "left":
+                    shoulder = landmarks[self.mp_pose.PoseLandmark.LEFT_SHOULDER]
+                    hip = landmarks[self.mp_pose.PoseLandmark.LEFT_HIP]
+                    knee = landmarks[self.mp_pose.PoseLandmark.LEFT_KNEE]
+                    ankle = landmarks[self.mp_pose.PoseLandmark.LEFT_ANKLE]
+                    wrist = landmarks[self.mp_pose.PoseLandmark.LEFT_WRIST]
+                else:
+                    shoulder = landmarks[self.mp_pose.PoseLandmark.RIGHT_SHOULDER]
+                    hip = landmarks[self.mp_pose.PoseLandmark.RIGHT_HIP]
+                    knee = landmarks[self.mp_pose.PoseLandmark.RIGHT_KNEE]
+                    ankle = landmarks[self.mp_pose.PoseLandmark.RIGHT_ANKLE]
+                    wrist = landmarks[self.mp_pose.PoseLandmark.RIGHT_WRIST]
+
+                # key skeleton: shoulder-hip-knee-ankle and a single arm reference
+                cv2.line(frame, pt(shoulder), pt(hip), color_body, 2)
+                cv2.line(frame, pt(hip), pt(knee), color_knee, 4)
+                cv2.line(frame, pt(knee), pt(ankle), color_knee, 4)
+                cv2.circle(frame, pt(hip), 5, color_joint, -1)
+                cv2.circle(frame, pt(knee), 5, color_joint, -1)
+                cv2.circle(frame, pt(ankle), 4, color_joint, -1)
+
+                if metrics.hand_raised:
+                    cv2.line(frame, pt(shoulder), pt(wrist), color_top, 2)
+                    cv2.circle(frame, pt(wrist), 4, color_top, -1)
+                
         except Exception:
             pass
 
