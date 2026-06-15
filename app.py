@@ -59,7 +59,6 @@ class CyberTrainerApp:
             minimum_quality=self.config.minimum_quality,
             feedback=self.exercise.default_feedback,
         )
-        # Osobny analyzer dla każdego slotu kamery
         self.analyzers = {i: MovementAnalyzer() for i in range(self.config.max_camera_slots)}
 
         self.session_active = False
@@ -76,6 +75,15 @@ class CyberTrainerApp:
         self._last_camera_scan_at = 0.0
         self._remote_frame: Image.Image | None = None
         self._remote_frame_lock = threading.Lock()
+
+        # --- Zmienne nowej maszyny stanów i kalkulatora jakości powtórzeń ---
+        self._rep_state = "START"  # START -> GOING_UP -> TOP_HOLDING -> LOCK_REQUIRE_DOWN
+        self._top_hold_started_at: float | None = None
+        self._rep_started_elapsed = 0.0
+        self._current_rep_frames_count = 0
+        self._current_rep_hip_correct_frames = 0
+        self._current_rep_knee_correct_frames = 0
+        self._last_calculated_quality = 100
 
         self.view = CyberTrainerView(
             config=self.config,
@@ -119,22 +127,17 @@ class CyberTrainerApp:
         """Keep the scorer object aligned with the controller counters."""
 
         self.scorer.repetitions = self._rep_count
-        self.scorer.quality = max(self.config.minimum_quality, min(100, self.scorer.quality))
+        self.scorer.quality = max(self.config.minimum_quality, min(100, self._last_calculated_quality))
 
     def run(self) -> None:
         """Start background services and enter the Tk event loop."""
 
         self.camera.refresh_devices()
-        
-        # Przypisz kamery do slotów
         for slot_index, device_id in enumerate(self.camera.available_devices):
             if slot_index < self.config.max_camera_slots:
                 self.camera.switch_camera(slot_index, device_id)
-        
         self.transport.start()
         self.camera.start()
-        
-        # Czekaj na załadowanie się któregokolwiek slotu (max 5 sekund)
         for i in range(50):
             any_frame_available = False
             for slot_idx in range(self.config.max_camera_slots):
@@ -145,7 +148,6 @@ class CyberTrainerApp:
             if any_frame_available:
                 break
             time.sleep(0.1)
-        
         self.view.after(self.config.update_interval_ms, self._update_loop)
         self.view.mainloop()
 
@@ -170,6 +172,16 @@ class CyberTrainerApp:
         self._rep_count = 0
         self._tempo_samples = []
         self._last_pose_zone = "unknown"
+        
+        # Reset zmiennych nowej maszyny stanów przy starcie sesji
+        self._rep_state = "START"
+        self._top_hold_started_at = None
+        self._rep_started_elapsed = 0.0
+        self._current_rep_frames_count = 0
+        self._current_rep_hip_correct_frames = 0
+        self._current_rep_knee_correct_frames = 0
+        self._last_calculated_quality = 100
+
         for analyzer in self.analyzers.values():
             analyzer.reset()
         self.scorer.reset()
@@ -340,7 +352,6 @@ class CyberTrainerApp:
             max_height = max(240, area.winfo_height() or 480)
             ok, frame, source_index = self.camera.read(slot_index)
             if ok and frame is not None:
-                # Analyze frame with MediaPipe for each camera independently
                 metrics, frame = self.analyzers[slot_index].analyze_frame(frame)
                 if metrics.pose_detected and metrics.visibility >= best_metrics.visibility:
                     best_metrics = metrics
@@ -377,6 +388,22 @@ class CyberTrainerApp:
 
         self.view.set_pose_metrics(pose_metrics)
 
+        # 1. Określenie poprawności kątów klatka po klatce (zgodnie z zielonym podświetleniem ze szkieletu)
+        hip_correct = False
+        knee_correct = False
+
+        if pose_metrics.pose_detected:
+            if pose_metrics.side == "front":
+                # Przód: kolano zielone gdy różnica < 10.0 stopni
+                knee_correct = (pose_metrics.knee_angle_front < 10.0)
+                hip_correct = True  # z przodu nie mierzymy bocznego biodra, traktujemy jako prawidłowe
+            else:
+                # Bok: biodro zielone w pełnym wyproście 180 +/- 5 stopni
+                hip_correct = (175.0 <= pose_metrics.upper_body_angle <= 185.0)
+                # Bok: łydka zielona w pionie 90 +/- 5 stopni
+                knee_correct = (85.0 <= pose_metrics.knee_angle_side <= 95.0)
+
+        # Obsługa stanów sesji
         if self.session_mode == "idle":
             if pose_metrics.hand_raised:
                 self._arm_session(trigger="gesture")
@@ -386,41 +413,91 @@ class CyberTrainerApp:
         elif self.session_mode == "arming":
             self.view.set_workout_status("Ustaw start", pose_metrics.message)
             self.view.set_feedback(pose_metrics.message)
-            '''if pose_metrics.bottom_ready:
-                self.session_mode = "active"
-                self.session_active = True
-                self.session_started_at = now
-                self.session_elapsed = 0.0
-                self.last_tick = now
-                self._rep_anchor_elapsed = 0.0
-                self._last_pose_zone = "bottom"
-                self.view.set_workout_status("Aktywna", "Zaczynamy! Liczenie powtórzeń i czasu jest uruchomione.")
-                self.view.set_feedback("Zaczynamy!")
-                self.view.append_event("Zaczynamy")'''
+            
+            # Przejście do treningu automatycznie po zejściu do pozycji niskiej (90-135 stopni w biodrach)
+            if pose_metrics.pose_detected and pose_metrics.side != "front":
+                if 90.0 <= pose_metrics.upper_body_angle <= 135.0:
+                    self.session_mode = "active"
+                    self.session_active = True
+                    self.session_started_at = now
+                    self.session_elapsed = 0.0
+                    self.last_tick = now
+                    self._rep_state = "START"
+                    self.view.set_workout_status("Aktywna", "Rozpocznij wznos bioder.")
+                    self.view.set_feedback("Trening aktywny!")
 
         elif self.session_mode == "paused":
-            self.view.set_workout_status("Pauza", "Seria wstrzymana. Czas i tempo nie są liczone.")
+            self.view.set_workout_status("Pauza", "Seria wstrzymana.")
 
         elif self.session_mode == "active":
-            zone = "top" if pose_metrics.top_ready else "bottom" if pose_metrics.bottom_ready else "mid"
             self.view.set_workout_status("Aktywna", pose_metrics.message)
 
-            if pose_metrics.bottom_ready:
-                self._rep_anchor_elapsed = self.session_elapsed
+            if pose_metrics.pose_detected and pose_metrics.side != "front":
+                hip_angle = pose_metrics.upper_body_angle
 
-            if zone == "top" and self._last_pose_zone != "top":
-                if self._rep_anchor_elapsed is not None:
-                    rep_duration = max(0.01, self.session_elapsed - self._rep_anchor_elapsed)
-                    self._rep_count += 1
-                    self._tempo_samples.append(rep_duration)
-                    self.scorer.repetitions = self._rep_count
-                    self.scorer.feedback = f"Powtórzenie {self._rep_count} | tempo {rep_duration:.2f} s"
-                    self.view.append_event(f"Powtórzenie {self._rep_count} | tempo {rep_duration:.2f} s")
-                    self.view.set_feedback(self.scorer.feedback)
-                self._rep_anchor_elapsed = None
+                # --- MASZYNA STANÓW POWTÓRZENIA ---
+                if self._rep_state == "START":
+                    # Rozpoczynamy od pozycji opuszczonej (biodra 90 - 135 stopni)
+                    if 90.0 <= hip_angle <= 135.0:
+                        self._rep_state = "GOING_UP"
+                        self._rep_started_elapsed = self.session_elapsed
+                        self._current_rep_frames_count = 0
+                        self._current_rep_hip_correct_frames = 0
+                        self._current_rep_knee_correct_frames = 0
 
-            self._last_pose_zone = zone
+                elif self._rep_state == "GOING_UP":
+                    # Ruch w górę: zliczamy ramki i ich poprawność
+                    self._current_rep_frames_count += 1
+                    if hip_correct: self._current_rep_hip_correct_frames += 1
+                    if knee_correct: self._current_rep_knee_correct_frames += 1
 
+                    # Czy osiągnięto pełny wyprost górny?
+                    if 175.0 <= hip_angle <= 185.0:
+                        self._rep_state = "TOP_HOLDING"
+                        self._top_hold_started_at = now
+
+                elif self._rep_state == "TOP_HOLDING":
+                    self._current_rep_frames_count += 1
+                    if hip_correct: self._current_rep_hip_correct_frames += 1
+                    if knee_correct: self._current_rep_knee_correct_frames += 1
+
+                    # Jeśli użytkownik spadnie z pozycji górnej przed upływem sekundy -> wraca do podnoszenia
+                    if not (175.0 <= hip_angle <= 185.0):
+                        self._rep_state = "GOING_UP"
+                        self._top_hold_started_at = None
+                    else:
+                        # Weryfikacja utrzymania pozycji przez minimum 1 sekundę
+                        if self._top_hold_started_at and (now - self._top_hold_started_at) >= 1.0:
+                            self._rep_count += 1
+                            rep_duration = max(0.01, self.session_elapsed - self._rep_started_elapsed)
+                            self._tempo_samples.append(rep_duration)
+
+                            # Wyliczanie oceny średniej z czasu powtórzenia (50% biodra, 50% kolana)
+                            if self._current_rep_frames_count > 0:
+                                hip_score = (self._current_rep_hip_correct_frames / self._current_rep_frames_count) * 50.0
+                                knee_score = (self._current_rep_knee_correct_frames / self._current_rep_frames_count) * 50.0
+                                self._last_calculated_quality = int(hip_score + knee_score)
+                            else:
+                                self._last_calculated_quality = 100
+
+                            msg = f"Powtórzenie {self._rep_count} | Jakość: {self._last_calculated_quality}%"
+                            self.scorer.feedback = msg
+                            self.view.append_event(msg)
+                            self.view.set_feedback(msg)
+
+                            # Blokada: zaliczone, wymagamy powrotu na dół przed kolejnym powtórzeniem
+                            self._rep_state = "LOCK_REQUIRE_DOWN"
+
+                elif self._rep_state == "LOCK_REQUIRE_DOWN":
+                    # Dopiero zejście bioder poniżej 135 stopni resetuje maszynę stanów do pozycji START
+                    if hip_angle < 135.0:
+                        self._rep_state = "START"
+            else:
+                # Kontynuacja zliczania klatek jako niepoprawne w przypadku chwilowej zguby sylwetki
+                if self._rep_state in {"GOING_UP", "TOP_HOLDING"}:
+                    self._current_rep_frames_count += 1
+
+        # Wyznaczenie średnich statystyk tempa
         if self._tempo_samples:
             avg_tempo = sum(self._tempo_samples) / len(self._tempo_samples)
             current_tempo = self._tempo_samples[-1]
@@ -428,16 +505,10 @@ class CyberTrainerApp:
             avg_tempo = 0.0
             current_tempo = 0.0
 
-        quality = 100
-        if not pose_metrics.pose_detected:
-            quality -= 10
-        else:#if pose_metrics.knee_error is not None and not math.isnan(pose_metrics.knee_error):
-            pass
-            #quality -= int((1.0 - pose_metrics.knee_error) * 10)
-
         self.scorer.warnings = max(0, self.scorer.warnings)
-        self.scorer.quality = max(self.config.minimum_quality, min(100, quality))
+        self.scorer.quality = max(self.config.minimum_quality, min(100, self._last_calculated_quality))
         self._sync_score_state()
+
         snapshot = self.scorer.snapshot()
         self.view.set_metrics(snapshot, self._format_elapsed())
         self.view.set_workout_counters(
