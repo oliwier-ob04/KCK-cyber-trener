@@ -10,7 +10,6 @@ from typing import Callable, Sequence
 import tkinter as tk
 from tkinter import ttk
 
-from exercises.hip_thrust import ExerciseProfile
 from scoring.engine import ScoreSnapshot
 from utils.config import AppConfig
 
@@ -48,7 +47,6 @@ class CyberTrainerView(tk.Tk):
     def __init__(
         self,
         config: AppConfig,
-        exercise: ExerciseProfile,
         callbacks: ViewCallbacks,
         camera_only: bool = False,
     ) -> None:
@@ -56,7 +54,6 @@ class CyberTrainerView(tk.Tk):
 
         super().__init__()
         self.config = config
-        self.exercise = exercise
         self.callbacks = callbacks
         self.camera_only = camera_only
 
@@ -70,7 +67,7 @@ class CyberTrainerView(tk.Tk):
 
         self.source_label = tk.StringVar(value="Demo mode")
         self.connection_label = tk.StringVar(value="Kamera nieaktywna")
-        self.feedback_label = tk.StringVar(value=exercise.default_feedback)
+        self.feedback_label = tk.StringVar(value="Sugestie")
         self.metric_reps = tk.StringVar(value="0")
         self.metric_time = tk.StringVar(value="00:00")
         self.metric_quality = tk.StringVar(value=f"{config.default_quality}%")
@@ -618,10 +615,10 @@ class CyberTrainerView(tk.Tk):
     def _build_camera_card(self, parent: ttk.Frame) -> None:
         """Build the side-by-side camera preview area."""
         if not self.camera_only:
-            ttk.Label(parent, text=self.exercise.title, style="Section.TLabel").pack(anchor="w")
+            ttk.Label(parent, text="hip thrust", style="Section.TLabel").pack(anchor="w")
             ttk.Label(
                 parent,
-                text=self.exercise.description,
+                text="Opis ćwiczenia hip thrust",
                 style="CardText.TLabel",
                 wraplength=760,
                 justify="left",
@@ -785,7 +782,7 @@ class CyberTrainerView(tk.Tk):
             btn.pack(fill="x", pady=6)
 
         ttk.Label(parent, text="Sugestie techniczne", style="Section.TLabel").pack(anchor="w", pady=(18, 8))
-        ttk.Label(parent, text="\n".join(self.exercise.tips), style="CardText.TLabel", justify="left").pack(anchor="w")
+        ttk.Label(parent, text="\n".join(["Sugestie"]), style="CardText.TLabel", justify="left").pack(anchor="w")
 
     def _build_feedback_card(self, parent: ttk.Frame) -> None:
         """Build the feedback and system event cards."""
@@ -810,22 +807,6 @@ class CyberTrainerView(tk.Tk):
         right.grid(row=0, column=1, sticky="nsew")
 
         tk.Label(left, text="Ocena techniki", bg=self.config.card_color, fg=self.config.text_secondary, font=("Segoe UI", 10, "bold")).pack(anchor="w", pady=(0, 8))
-        for row_def in self.exercise.technique_rows:
-            row = tk.Frame(left, bg="#111c33")
-            row.pack(fill="x", pady=4)
-            tk.Label(row, text=row_def.label, bg=self.config.card_color, fg=self.config.text_muted, font=("Segoe UI", 10)).pack(side="left")
-            
-            if row_def.label == "Kolana":
-                self.technique_knee_label_widget = tk.Label(
-                    row, 
-                    textvariable=self.technique_knee_value, 
-                    bg=self.config.card_color, 
-                    fg=self.technique_knee_color, 
-                    font=("Segoe UI", 10, "bold")
-                )
-                self.technique_knee_label_widget.pack(side="right")
-            else:
-                tk.Label(row, text=row_def.value, bg=self.config.card_color, fg=row_def.color, font=("Segoe UI", 10, "bold")).pack(side="right")
 
         tk.Label(right, text="Komunikaty systemu", bg=self.config.card_color, fg=self.config.text_secondary, font=("Segoe UI", 10, "bold")).pack(anchor="w", pady=(0, 8))
         self.event_log = tk.Listbox(right, bg=self.config.list_bg, fg=self.config.text_secondary, highlightthickness=0, selectbackground=self.config.chip_bg, borderwidth=0, activestyle="none")

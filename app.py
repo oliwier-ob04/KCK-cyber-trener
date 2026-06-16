@@ -15,7 +15,6 @@ from PIL import Image
 from ar.renderer import FrameRenderer
 from cameras.manager import CameraManager
 from cameras.network import FrameRelayService
-from exercises.hip_thrust import ExerciseProfile, build_hip_thrust_exercise
 from pose.analyzer import MovementAnalyzer, PoseMetrics
 from scoring.engine import ScoreSnapshot, SessionScorer
 from ui.styles import StyleManager
@@ -48,14 +47,13 @@ class CyberTrainerApp:
     def __init__(self, config: AppConfig | None = None) -> None:
         """Build the application with injectable defaults."""
         self.config = config or build_default_config()
-        self.exercise: ExerciseProfile = build_hip_thrust_exercise()
         self.store = SessionStore(self.config.history_file)
         self._rng = random.Random()
         self.scorer = SessionScorer(
             rng=self._rng,
             initial_quality=self.config.default_quality,
             minimum_quality=self.config.minimum_quality,
-            feedback=self.exercise.default_feedback,
+            feedback="Sugestie",
         )
         self.analyzers = {i: MovementAnalyzer() for i in range(self.config.max_camera_slots)}
 
@@ -85,7 +83,6 @@ class CyberTrainerApp:
 
         self.view = CyberTrainerView(
             config=self.config,
-            exercise=self.exercise,
             callbacks=ViewCallbacks(
                 on_start_session=self.start_session,
                 on_toggle_pause=self.toggle_pause,
@@ -116,7 +113,7 @@ class CyberTrainerApp:
         self._load_history()
         self._refresh_camera_sources(force=True)
         self._update_camera_status()
-        self.view.set_feedback(self.exercise.default_feedback)
+        self.view.set_feedback("Sugestie")
         self.view.set_metrics(self.scorer.snapshot(), self._format_elapsed())
         self.view.set_workout_status("Gotowy", "Naciśnij Start albo unieś rękę, aby rozpocząć ustawianie pozycji startowej.")
         self.view.set_pose_metrics(PoseMetrics(False))
@@ -363,130 +360,137 @@ class CyberTrainerApp:
         elif self.session_mode in {"arming", "active", "paused"}:
             self.end_session()
 
-    def _update_metrics(self, pose_metrics: PoseMetrics | None = None) -> None:
-        """Advance the motion analysis and refresh the visible metrics."""
-        pose_metrics = pose_metrics or self._latest_pose_metrics
-        now = time.time()
-        delta = now - self.last_tick
-        self.last_tick = now
-
-        if self.session_mode == "active":
-            self.session_elapsed += delta
-
-        self.view.set_pose_metrics(pose_metrics)
-
-        # --- GESTURE TOGGLE CONTROL ---
-        if pose_metrics.pose_detected and pose_metrics.hand_raised:
-            self._handle_gesture_toggle()
+    def _update_metrics(self, pose_metrics: PoseMetrics | None) -> None:
+        """Translate raw pose signals into training metrics and updates the UI."""
+        if pose_metrics is None:
             return
 
-        # 1. Określenie poprawności kątów klatka po klatce
-        hip_correct = False
-        knee_correct = False
+        now = time.time()
+        repetition_event = False
+
+        # Podgląd kątów na żywo
+        self.view.set_pose_metrics(pose_metrics)
+
+        # Sprawdzenie, czy dłoń jest uniesiona
+        hand_is_raised = getattr(pose_metrics, "hand_raised", False)
+
+        # 1. TWOJE ORYGINALNE PRZEŁĄCZANIE STANÓW GESTEM
+        if self.session_mode == "idle":
+            if hand_is_raised:
+                self._arm_session(trigger="gesture")
+            return
+
+        if self.session_mode == "arming":
+            hip_angle = getattr(pose_metrics, "upper_body_angle", 0.0)
+            if pose_metrics.pose_detected and (80.0 <= hip_angle <= 140.0):
+                self.session_mode = "active"
+                self.session_active = True
+                self.session_started_at = now
+                self.last_tick = now
+                self.view.set_workout_status("Aktywna", "Pozycja startowa wykryta! Rozpocznij hip thrusty.")
+                self.view.set_feedback("Rozpocznij ćwiczenie. Unieś biodra do pełnego wyprostu.")
+                self.view.append_event("Seria aktywowana")
+            return
+
+        if self.session_mode == "active":
+            if hand_is_raised:
+                self.end_session()
+                return
+
+        # Jeśli sesja nie jest aktywna (np. paused), przerywamy dalsze przetwarzanie
+        if self.session_mode == "paused" or not self.session_active:
+            return
+
+        # Zliczanie czasu trwania sesji
+        self.session_elapsed += now - self.last_tick
+        self.last_tick = now
+
+        # 2. MASZYNA STANÓW HIP THRUST Z DYNAMICZNĄ OCENĄ KLATEK (ENGINE)
+        hip_angle = getattr(pose_metrics, "upper_body_angle", 0.0)
+        knee_front = getattr(pose_metrics, "knee_angle_front", 0.0)
+        knee_side = getattr(pose_metrics, "knee_angle_side", 0.0)
+
+        # Pobieranie poprawności klatki z engine.py na podstawie aktualnego stanu
+        if self._rep_state == "GOING_UP":
+            hip_correct = self.scorer.grade_hip_going_up(hip_angle)
+            knee_correct = self.scorer.grade_knee_going_up(knee_front, knee_side)
+        elif self._rep_state == "TOP_HOLDING":
+            hip_correct = self.scorer.grade_hip_holding(hip_angle)
+            knee_correct = self.scorer.grade_knee_holding(knee_front, knee_side)
+        else:
+            # Dla pozostałych stanów (START/LOCK) bazowe sprawdzenie bezpieczeństwa
+            hip_correct = not math.isnan(hip_angle) and (170.0 <= hip_angle <= 190.0 or self._rep_state == "GOING_UP")
+            knee_correct = True
 
         if pose_metrics.pose_detected:
-            if pose_metrics.side == "front":
-                knee_correct = (pose_metrics.knee_angle_front < 10.0)
-                hip_correct = True
-            else:
-                hip_correct = (175.0 <= pose_metrics.upper_body_angle <= 185.0)
-                knee_correct = (85.0 <= pose_metrics.knee_angle_side <= 95.0)
+            if self._rep_state == "START":
+                if 90.0 <= hip_angle <= 135.0:
+                    self._rep_state = "GOING_UP"
+                    self._rep_started_elapsed = self.session_elapsed
+                    self._current_rep_frames_count = 0
+                    self._current_rep_hip_correct_frames = 0
+                    self._current_rep_knee_correct_frames = 0
 
-        # 2. Obsługa maszyn stanów w zależności od trybu treningu
-        if self.session_mode == "idle":
-            self.view.set_workout_status("Gotowy", "Naciśnij Start albo unieś rękę, aby rozpocząć ustawianie pozycji startowej.")
+            elif self._rep_state == "GOING_UP":
+                self._current_rep_frames_count += 1
+                if hip_correct: self._current_rep_hip_correct_frames += 1
+                if knee_correct: self._current_rep_knee_correct_frames += 1
 
-        elif self.session_mode == "arming":
-            self.view.set_workout_status("Ustaw start", pose_metrics.message)
-            self.view.set_feedback(pose_metrics.message)
-            
-            if pose_metrics.pose_detected and pose_metrics.side != "front":
-                if 90.0 <= pose_metrics.upper_body_angle <= 135.0:
-                    self.session_mode = "active"
-                    self.session_active = True
-                    self.session_started_at = now
-                    self.session_elapsed = 0.0
-                    self.last_tick = now
+                if 175.0 <= hip_angle <= 185.0:
+                    self._rep_state = "TOP_HOLDING"
+                    self._top_hold_started_at = now
+
+            elif self._rep_state == "TOP_HOLDING":
+                self._current_rep_frames_count += 1
+                if hip_correct: self._current_rep_hip_correct_frames += 1
+                if knee_correct: self._current_rep_knee_correct_frames += 1
+
+                if not (175.0 <= hip_angle <= 185.0):
+                    self._rep_state = "GOING_UP"
+                    self._top_hold_started_at = None
+                else:
+                    if self._top_hold_started_at and (now - self._top_hold_started_at) >= 1.0:
+                        
+                        # Przekazanie zgromadzonych klatek do finalnego podsumowania w engine.py
+                        msg = self.scorer.register_repetition(
+                            correct_hip_frames=self._current_rep_hip_correct_frames,
+                            correct_knee_frames=self._current_rep_knee_correct_frames,
+                            total_frames=self._current_rep_frames_count
+                        )
+                        
+                        # Synchronizacja parametrów z Twoimi zmiennymi aplikacji
+                        self._rep_count = self.scorer.repetitions
+                        self._last_calculated_quality = self.scorer.quality
+                        repetition_event = True
+
+                        rep_duration = max(0.01, self.session_elapsed - self._rep_started_elapsed)
+                        self._tempo_samples.append(rep_duration)
+
+                        self.view.append_event(msg)
+                        self.view.set_feedback(msg)
+
+                        self._rep_state = "LOCK_REQUIRE_DOWN"
+
+            elif self._rep_state == "LOCK_REQUIRE_DOWN":
+                if hip_angle < 135.0:
                     self._rep_state = "START"
-                    self.view.set_workout_status("Aktywna", "Rozpocznij wznos bioder.")
-                    self.view.set_feedback("Trening aktywny!")
+        else:
+            if self._rep_state in {"GOING_UP", "TOP_HOLDING"}:
+                self._current_rep_frames_count += 1
 
-        elif self.session_mode == "paused":
-            self.view.set_workout_status("Pauza", "Seria wstrzymana.")
-
-        elif self.session_mode == "active":
-            self.view.set_workout_status("Aktywna", pose_metrics.message)
-
-            if pose_metrics.pose_detected and pose_metrics.side != "front":
-                hip_angle = pose_metrics.upper_body_angle
-
-                # --- MASZYNA STANÓW POWTÓRZENIA ---
-                if self._rep_state == "START":
-                    if 90.0 <= hip_angle <= 135.0:
-                        self._rep_state = "GOING_UP"
-                        self._rep_started_elapsed = self.session_elapsed
-                        self._current_rep_frames_count = 0
-                        self._current_rep_hip_correct_frames = 0
-                        self._current_rep_knee_correct_frames = 0
-
-                elif self._rep_state == "GOING_UP":
-                    self._current_rep_frames_count += 1
-                    if hip_correct: self._current_rep_hip_correct_frames += 1
-                    if knee_correct: self._current_rep_knee_correct_frames += 1
-
-                    if 175.0 <= hip_angle <= 185.0:
-                        self._rep_state = "TOP_HOLDING"
-                        self._top_hold_started_at = now
-
-                elif self._rep_state == "TOP_HOLDING":
-                    self._current_rep_frames_count += 1
-                    if hip_correct: self._current_rep_hip_correct_frames += 1
-                    if knee_correct: self._current_rep_knee_correct_frames += 1
-
-                    if not (175.0 <= hip_angle <= 185.0):
-                        self._rep_state = "GOING_UP"
-                        self._top_hold_started_at = None
-                    else:
-                        if self._top_hold_started_at and (now - self._top_hold_started_at) >= 1.0:
-                            self._rep_count += 1
-                            rep_duration = max(0.01, self.session_elapsed - self._rep_started_elapsed)
-                            self._tempo_samples.append(rep_duration)
-
-                            if self._current_rep_frames_count > 0:
-                                hip_score = (self._current_rep_hip_correct_frames / self._current_rep_frames_count) * 50.0
-                                knee_score = (self._current_rep_knee_correct_frames / self._current_rep_frames_count) * 50.0
-                                self._last_calculated_quality = int(hip_score + knee_score)
-                            else:
-                                self._last_calculated_quality = 100
-
-                            msg = f"Powtórzenie {self._rep_count} | Jakość: {self._last_calculated_quality}%"
-                            self.scorer.feedback = msg
-                            self.view.append_event(msg)
-                            self.view.set_feedback(msg)
-
-                            self._rep_state = "LOCK_REQUIRE_DOWN"
-
-                elif self._rep_state == "LOCK_REQUIRE_DOWN":
-                    if hip_angle < 135.0:
-                        self._rep_state = "START"
-            else:
-                if self._rep_state in {"GOING_UP", "TOP_HOLDING"}:
-                    self._current_rep_frames_count += 1
-
-        # Wyznaczenie średnich statystyk tempa
+        # 3. TWOJA ORYGINALNA SYNCHRONIZACJA STATUSU I WIDOKU UI
+        self._sync_score_state()
+        
+        snapshot = self.scorer.snapshot(repetition_event=repetition_event)
+        self.view.set_metrics(snapshot, self._format_elapsed())
+        
         if self._tempo_samples:
-            avg_tempo = sum(self._tempo_samples) / len(self._tempo_samples)
             current_tempo = self._tempo_samples[-1]
+            avg_tempo = sum(self._tempo_samples) / len(self._tempo_samples)
         else:
             avg_tempo = 0.0
             current_tempo = 0.0
 
-        self.scorer.warnings = max(0, self.scorer.warnings)
-        self.scorer.quality = max(self.config.minimum_quality, min(100, self._last_calculated_quality))
-        self._sync_score_state()
-
-        snapshot = self.scorer.snapshot()
-        self.view.set_metrics(snapshot, self._format_elapsed())
         self.view.set_workout_counters(
             elapsed_text=self._format_elapsed(),
             current_tempo=f"{current_tempo:.2f} s" if current_tempo else "--",
