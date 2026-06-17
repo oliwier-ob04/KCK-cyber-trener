@@ -21,6 +21,7 @@ from ui.styles import StyleManager
 from ui.view import CyberTrainerView, ViewCallbacks
 from utils.config import AppConfig, build_default_config, save_persisted_settings
 from utils.session_store import SessionResult, SessionStore
+from audio.voice_feedback import VoiceFeedback
 from utils.time_utils import format_elapsed_seconds
 
 
@@ -84,6 +85,8 @@ class CyberTrainerApp:
         self._remote_frame: Image.Image | None = None
         self._remote_frame_lock = threading.Lock()
         self._gesture_toggle_block_until = 0.0
+        self.voice = VoiceFeedback(min_interval_seconds=1.8, enabled=self.config.voice_feedback_enabled)
+        self._last_instruction_at = 0.0
 
         # --- Zmienne maszyny stanów i kalkulatora jakości powtórzeń ---
         self._rep_state = "WAITING_TOP_START"  # WAITING_TOP_START -> WAITING_FOR_DESCENT -> GOING_DOWN_TO_BOTTOM -> GOING_UP_TO_TOP -> TOP_HOLDING
@@ -94,6 +97,10 @@ class CyberTrainerApp:
         self._current_rep_hip_correct_frames = 0
         self._current_rep_knee_correct_frames = 0
         self._last_calculated_quality = 100
+        self._current_rep_issues: set[str] = set()
+        self._top_hold_feedback_sent = False
+        self._side_metrics: PoseMetrics | None = None
+        self._front_metrics: PoseMetrics | None = None
 
         self.view = CyberTrainerView(
             config=self.config,
@@ -106,6 +113,7 @@ class CyberTrainerApp:
                 on_close=self._on_close,
                 on_camera_source_changed=self._on_camera_source_changed,
                 on_angle_tolerance_changed=self._on_angle_tolerance_changed,
+                on_voice_feedback_changed=self._on_voice_feedback_changed,
             ),
             camera_only=True,
         )
@@ -204,6 +212,8 @@ class CyberTrainerApp:
         self._current_rep_hip_correct_frames = 0
         self._current_rep_knee_correct_frames = 0
         self._last_calculated_quality = 100
+        self._current_rep_issues = set()
+        self._top_hold_feedback_sent = False
 
         for analyzer in self.analyzers.values():
             analyzer.reset()
@@ -212,11 +222,13 @@ class CyberTrainerApp:
         self.session_active = True
         self.session_started_at = time.time()
         self.last_tick = self.session_started_at
+        self._last_instruction_at = self.session_started_at
 
         self.view.set_workout_status("Aktywna", "Jedna dłoń nad głową = start, dwie dłonie = stop.")
         self.view.set_feedback("Seria uruchomiona.")
         self.view.set_primary_action_label("STOP")
         self.view.append_event(f"Seria uruchomiona ({trigger})")
+        self.voice.say("Seria uruchomiona.")
         self._sync_score_state()
 
         self._update_camera_status()
@@ -276,6 +288,7 @@ class CyberTrainerApp:
         self.view.set_feedback("Seria zakończona.")
         self.view.set_primary_action_label("START")
         self.view.append_event("Seria zakończona")
+        self.voice.say("Seria zakończona.")
         self.save_result(auto=True)
 
     def save_result(self, auto: bool = False) -> None:
@@ -350,6 +363,51 @@ class CyberTrainerApp:
         )
         self.view.append_event(f"Zmieniono tolerancję kąta ({label}) na ±{clamped:.1f}°")
 
+    def _on_voice_feedback_changed(self, enabled: bool) -> None:
+        """Handle voice feedback toggle from settings."""
+        self.config = replace(self.config, voice_feedback_enabled=enabled)
+        self.voice.set_enabled(enabled)
+        save_persisted_settings(self.config.settings_file, self.config)
+        status = "włączone" if enabled else "wyłączone"
+        self.view.append_event(f"Komunikaty głosowe {status}")
+        self.view.set_feedback(f"Komunikaty głosowe są teraz {status}.")
+
+    def _voice_issue_summary(self, issues: set[str]) -> str | None:
+        """Build a short spoken summary for the latest repetition (without repetition number)."""
+
+        if not issues:
+            return "Dobrze."
+
+        phrases: list[str] = []
+        if "hip" in issues:
+            phrases.append("plecy nie trzymały pozycji")
+        if "knee_side" in issues:
+            phrases.append("kolana z boku nie były stabilne na górze")
+        if "knee_front" in issues:
+            phrases.append("kolana z przodu były nier\u00f3wne")
+
+        if not phrases:
+            return "Uwaga na technikę."
+
+        joined = ", ".join(phrases)
+        return f"Uwaga: {joined}."
+
+    def _voice_top_hold_summary(self, hip_ok: bool, knee_side_ok: bool, knee_front_ok: bool | None = None) -> str:
+        """Build spoken feedback for the top hold, even when the rep is not yet completed."""
+
+        if hip_ok and knee_side_ok and (knee_front_ok is None or knee_front_ok):
+            return "Góra: plecy i kolana w porządku."
+
+        parts: list[str] = []
+        if not hip_ok:
+            parts.append("plecy za bardzo odjechały")
+        if not knee_side_ok:
+            parts.append("kolana z boku wymagają stabilizacji")
+        if knee_front_ok is not None and not knee_front_ok:
+            parts.append("kolana z przodu nierówne")
+
+        return f"Góra: {', '.join(parts)}."
+
     def _store_remote_frame(self, image: Image.Image) -> None:
         """Cache the latest remote image received over the network."""
         with self._remote_frame_lock:
@@ -408,6 +466,9 @@ class CyberTrainerApp:
     def _update_camera_panels(self) -> PoseMetrics:
         """Render the active camera sources into the two preview panels."""
         best_metrics = PoseMetrics(False)
+        self._side_metrics = None
+        self._front_metrics = None
+        
         for slot_index in range(self.config.max_camera_slots):
             panel = self.view.get_camera_panel(slot_index)
             area = getattr(panel, "inner_image_area", panel.holder)
@@ -416,8 +477,19 @@ class CyberTrainerApp:
             ok, frame, source_index = self.camera.read(slot_index)
             if ok and frame is not None:
                 metrics, frame = self.analyzers[slot_index].analyze_frame(frame)
-                if metrics.pose_detected and metrics.visibility >= best_metrics.visibility:
-                    best_metrics = metrics
+                if metrics.pose_detected:
+                    # Identify camera type by available metrics
+                    has_hip_angle = not math.isnan(metrics.upper_body_angle)
+                    has_knee_front = not math.isnan(metrics.knee_angle_front)
+                    
+                    # Store metrics by view type for dual-camera analysis
+                    if has_hip_angle:
+                        self._side_metrics = metrics
+                    if has_knee_front:
+                        self._front_metrics = metrics
+                    
+                    if metrics.visibility >= best_metrics.visibility:
+                        best_metrics = metrics
                 
                 photo = self.renderer.frame_to_photo(frame, max_width, max_height)
                 self.view.update_camera_panel(
@@ -456,11 +528,12 @@ class CyberTrainerApp:
         # Podgląd kątów na żywo
         self.view.set_pose_metrics(pose_metrics)
 
-        # Sprawdzenie, czy dłoń jest uniesiona
-        hand_is_raised = getattr(pose_metrics, "hand_raised", False)
-        start_gesture = getattr(pose_metrics, "start_gesture", hand_is_raised)
-        stop_gesture = getattr(pose_metrics, "stop_gesture", False)
-        two_hands_visible = getattr(pose_metrics, "two_hands_visible", False)
+        # Sprawdzenie, czy dłoń jest uniesiona - ze strony bocznej lub frontu
+        metrics_for_gestures = self._side_metrics or self._front_metrics or pose_metrics
+        hand_is_raised = getattr(metrics_for_gestures, "hand_raised", False)
+        start_gesture = getattr(metrics_for_gestures, "start_gesture", hand_is_raised)
+        stop_gesture = getattr(metrics_for_gestures, "stop_gesture", False)
+        two_hands_visible = getattr(metrics_for_gestures, "two_hands_visible", False)
         gesture_blocked = self._gesture_toggle_block_active(now)
 
         # Gesty sterujące sesją
@@ -487,26 +560,47 @@ class CyberTrainerApp:
         self.last_tick = now
 
         # 2. MASZYNA STANÓW HIP THRUST: top -> dół -> góra -> 1 s hold na górze
-        hip_angle = getattr(pose_metrics, "upper_body_angle", 0.0)
-        knee_front = getattr(pose_metrics, "knee_angle_front", 0.0)
-        knee_side = getattr(pose_metrics, "knee_angle_side", 0.0)
+        # Pobieramy plecy z kamery bocznej (główna analiza)
+        hip_angle = getattr(self._side_metrics, "upper_body_angle", 0.0) if self._side_metrics else 0.0
+        # Kolana z boku również z kamery bocznej
+        knee_side = getattr(self._side_metrics, "knee_angle_side", 0.0) if self._side_metrics else 0.0
+        # Kolana z przodu z kamery frontalnej, jeśli jest dostępna
+        knee_front = getattr(self._front_metrics, "knee_angle_front", float("nan")) if self._front_metrics else float("nan")
+        
+        # Fallback: jeśli mamy tylko jedną kamerę (front), bierz z niej dostępne dane
+        if not self._side_metrics and self._front_metrics:
+            hip_angle = getattr(self._front_metrics, "upper_body_angle", 0.0)
+            knee_side = getattr(self._front_metrics, "knee_angle_side", 0.0)
+        # Jeśli mamy tylko boczną, możemy spróbować pobrać kolana z przodu z niej
+        if not self._front_metrics and self._side_metrics:
+            knee_front = getattr(self._side_metrics, "knee_angle_front", float("nan"))
+        
+        # Określ, czy mamy dwie kamery czy jedną
+        has_both_cameras = self._side_metrics is not None and self._front_metrics is not None
 
         in_bottom_position = not math.isnan(hip_angle) and (80.0 <= hip_angle <= 140.0)
-        in_top_position = not math.isnan(hip_angle) and (175.0 <= hip_angle <= 185.0)
+        in_top_position = not math.isnan(hip_angle) and (165.0 <= hip_angle <= 175.0)
 
-        # Pobieranie poprawności klatki z engine.py na podstawie aktualnego stanu
-        if self._rep_state in {"GOING_DOWN_TO_BOTTOM", "GOING_UP_TO_TOP"}:
-            hip_correct = self.scorer.grade_hip_cycle(hip_angle)
-            knee_correct = True
-        elif self._rep_state == "TOP_HOLDING":
+        # Oceniamy tylko zatrzymanie na górze, nie całą drogę ruchu.
+        if self._rep_state == "TOP_HOLDING":
             hip_correct = self.scorer.grade_hip_top_hold(hip_angle)
-            knee_correct = self.scorer.grade_knee_stable(knee_side)
+            knee_side_correct = self.scorer.grade_knee_stable(knee_side)
+            # Ocena kolan z przodu - jeśli kamera jest dostępna
+            knee_front_correct = None
+            if not math.isnan(knee_front):
+                knee_front_correct = self.scorer.grade_knee_stable(knee_front)
         else:
             hip_correct = False
-            knee_correct = False
+            knee_side_correct = False
+            knee_front_correct = None
 
-        if pose_metrics.pose_detected:
+        if self._side_metrics and self._side_metrics.pose_detected:
             if self._rep_state == "WAITING_TOP_START":
+                # Instruktujący komunikat co 15 sekund jeśli użytkownik czeka
+                if now - self._last_instruction_at >= 15.0:
+                    self.voice.say_nonblocking("Spróbuj wykonać ćwiczenie. Stanął w górze, schyl się, wstań.")
+                    self._last_instruction_at = now
+                
                 if in_top_position:
                     if self._top_hold_started_at is None:
                         self._top_hold_started_at = now
@@ -523,28 +617,45 @@ class CyberTrainerApp:
                     self._current_rep_frames_count = 0
                     self._current_rep_hip_correct_frames = 0
                     self._current_rep_knee_correct_frames = 0
+                    self._current_rep_issues = set()
 
             elif self._rep_state == "GOING_DOWN_TO_BOTTOM":
-                self._current_rep_frames_count += 1
-                if hip_correct: self._current_rep_hip_correct_frames += 1
-                if knee_correct: self._current_rep_knee_correct_frames += 1
-
                 if in_bottom_position:
                     self._rep_state = "GOING_UP_TO_TOP"
 
             elif self._rep_state == "GOING_UP_TO_TOP":
-                self._current_rep_frames_count += 1
-                if hip_correct: self._current_rep_hip_correct_frames += 1
-                if knee_correct: self._current_rep_knee_correct_frames += 1
-
                 if in_top_position:
                     self._rep_state = "TOP_HOLDING"
                     self._top_hold_started_at = now
+                    self._current_rep_frames_count = 0
+                    self._current_rep_hip_correct_frames = 0
+                    self._current_rep_knee_correct_frames = 0
+                    self._top_hold_feedback_sent = False
+
+                    hold_message = self._voice_top_hold_summary(
+                        hip_correct,
+                        knee_side_correct,
+                        knee_front_correct,
+                    )
+                    self.view.set_feedback(hold_message)
+                    self.view.append_event(hold_message)
+                    self.voice.say(hold_message)
+                    self._top_hold_feedback_sent = True
 
             elif self._rep_state == "TOP_HOLDING":
                 self._current_rep_frames_count += 1
                 if hip_correct: self._current_rep_hip_correct_frames += 1
-                if knee_correct: self._current_rep_knee_correct_frames += 1
+                # Count knee correctness - use side knee primarily, but if front is available, both must be correct
+                knee_ok_for_count = knee_side_correct and (knee_front_correct is None or knee_front_correct)
+                if knee_ok_for_count:
+                    self._current_rep_knee_correct_frames += 1
+                
+                if not hip_correct:
+                    self._current_rep_issues.add("hip")
+                if not knee_side_correct:
+                    self._current_rep_issues.add("knee_side")
+                if knee_front_correct is not None and not knee_front_correct:
+                    self._current_rep_issues.add("knee_front")
 
                 if not in_top_position:
                     self._rep_state = "GOING_DOWN_TO_BOTTOM"
@@ -566,9 +677,17 @@ class CyberTrainerApp:
 
                         self.view.append_event(msg)
                         self.view.set_feedback(msg)
+                        
+                        # Announce repetition number first
+                        self.voice.say(f"Powtórzenie {self._rep_count}.")
+                        
+                        voice_message = self._voice_issue_summary(set(self._current_rep_issues))
+                        if voice_message:
+                            self.voice.say(voice_message)
 
                         self._rep_state = "WAITING_FOR_DESCENT"
                         self._top_hold_started_at = None
+                        self._current_rep_issues = set()
         else:
             if self._rep_state in {"GOING_DOWN_TO_BOTTOM", "GOING_UP_TO_TOP", "TOP_HOLDING"}:
                 self._current_rep_frames_count += 1
@@ -608,6 +727,10 @@ class CyberTrainerApp:
 
     def _on_close(self) -> None:
         """Stop background services and close the window cleanly."""
+        try:
+            self.voice.close()
+        except Exception:
+            pass
         self.transport.stop()
         self.camera.close()
         self.view.destroy()

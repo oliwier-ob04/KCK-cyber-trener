@@ -54,7 +54,7 @@ class SessionScorer:
         import math
         if math.isnan(hip_angle):
             return False
-        return 170.0 <= hip_angle <= 190.0
+        return 165.0 <= hip_angle <= 175.0
 
     def grade_knee_stable(self, knee_side: float) -> bool:
         """Ocena stabilności kąta kolana podczas zatrzymania na górze."""

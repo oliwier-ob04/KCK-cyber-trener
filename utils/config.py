@@ -54,11 +54,12 @@ class AppConfig:
     side_back_tolerance_degrees: float = 10.0
     history_limit: int = 8
     max_camera_slots: int = 2
+    voice_feedback_enabled: bool = True
     history_file: Path = field(default_factory=lambda: _project_root() / "cyber_trener_history.json")
     settings_file: Path = field(default_factory=lambda: _project_root() / "cyber_trener_settings.json")
 
 
-def _load_json_settings(path: Path) -> dict[str, float]:
+def _load_json_settings(path: Path) -> dict[str, float | bool]:
     """Load persisted tolerance values from disk."""
 
     if not path.exists():
@@ -77,6 +78,12 @@ def _load_json_settings(path: Path) -> dict[str, float]:
         value = data.get(key)
         if isinstance(value, (int, float)):
             settings[key] = max(1.0, min(45.0, float(value)))
+    
+    # Load voice feedback setting
+    voice_enabled = data.get("voice_feedback_enabled")
+    if isinstance(voice_enabled, bool):
+        settings["voice_feedback_enabled"] = voice_enabled
+    
     return settings
 
 
@@ -87,6 +94,7 @@ def save_persisted_settings(path: Path, config: AppConfig) -> None:
         "front_tolerance_degrees": config.front_tolerance_degrees,
         "side_tolerance_degrees": config.side_tolerance_degrees,
         "side_back_tolerance_degrees": config.side_back_tolerance_degrees,
+        "voice_feedback_enabled": config.voice_feedback_enabled,
     }
     path.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
 

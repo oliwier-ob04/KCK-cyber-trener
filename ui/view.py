@@ -26,6 +26,7 @@ class ViewCallbacks:
     on_close: Callable[[], None]
     on_camera_source_changed: Callable[[int, str], None]
     on_angle_tolerance_changed: Callable[[str, float], None]
+    on_voice_feedback_changed: Callable[[bool], None]
 
 
 @dataclass
@@ -112,6 +113,7 @@ class CyberTrainerView(tk.Tk):
         self._suspend_tolerance_callbacks = False
         self._settings_camera_vars: list[tk.StringVar] = []
         self._settings_camera_boxes: list[ttk.Combobox] = []
+        self.voice_feedback_enabled = tk.BooleanVar(value=self.config.voice_feedback_enabled)
         self._build_ui()
 
     def set_connection_status(self, text: str) -> None:
@@ -924,6 +926,28 @@ class CyberTrainerView(tk.Tk):
         tk.Label(back_controls, text="°", bg="#0f1a2f", fg="#cfe1f5", font=("Segoe UI", 11, "bold")).pack(side="left", padx=(4, 0))
         back_entry.bind("<Return>", lambda event: self._apply_tolerance_from_entry("side_back", event))
         back_entry.bind("<FocusOut>", lambda event: self._apply_tolerance_from_entry("side_back", event))
+
+        voice_box = tk.Frame(card, bg="#10192c", highlightthickness=1, highlightbackground="#314058", bd=0)
+        voice_box.pack(fill="x", padx=16, pady=(0, 12))
+        voice_label = tk.Label(voice_box, text="Komunikaty głosowe", bg="#10192c", fg="#dbe7f6", font=("Segoe UI", 10, "bold"))
+        voice_label.pack(anchor="w", padx=14, pady=(12, 8))
+        voice_frame = tk.Frame(voice_box, bg="#10192c")
+        voice_frame.pack(fill="x", padx=14, pady=(0, 12))
+        voice_checkbox = tk.Checkbutton(
+            voice_frame,
+            text="Włącz komunikaty głosowe",
+            variable=self.voice_feedback_enabled,
+            command=lambda: self.callbacks.on_voice_feedback_changed(self.voice_feedback_enabled.get()),
+            bg="#10192c",
+            fg="#cfe1f5",
+            activebackground="#10192c",
+            activeforeground="#ffffff",
+            selectcolor="#10192c",
+            font=("Segoe UI", 10),
+            relief="flat",
+            bd=0,
+        )
+        voice_checkbox.pack(anchor="w")
 
         sources_box = tk.Frame(card, bg="#10192c", highlightthickness=1, highlightbackground="#314058", bd=0)
         sources_box.pack(fill="x", padx=16, pady=(0, 14))

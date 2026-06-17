@@ -1,5 +1,6 @@
 {
-  "front_tolerance_degrees": 10.0,
-  "side_tolerance_degrees": 10.0,
-  "side_back_tolerance_degrees": 10.0
+  "front_tolerance_degrees": 6.5,
+  "side_tolerance_degrees": 3.5,
+  "side_back_tolerance_degrees": 24.5,
+  "voice_feedback_enabled": false
 }
