@@ -132,6 +132,7 @@ class CyberTrainerApp:
             send_interval_seconds=self.config.send_interval_seconds,
             frame_provider=lambda: self.camera.read(0),
             on_frame_received=self._store_remote_frame,
+            send_enabled=False,
         )
 
         self._load_history()
@@ -630,7 +631,7 @@ class CyberTrainerApp:
             if self._rep_state == "WAITING_TOP_START":
                 # Instruktujący komunikat co 15 sekund jeśli użytkownik czeka
                 if now - self._last_instruction_at >= 15.0:
-                    self.voice.say_nonblocking("Spróbuj wykonać ćwiczenie. Stanął w górze, schyl się, wstań.")
+                    self.voice.say_nonblocking("Ustaw prawidłową pozycję, pamiętaj o stabilizacji kolan i pleców. Kolana w wyproście powinny być ugięte na 90 stopnii")
                     self._last_instruction_at = now
                 
                 if in_top_position:

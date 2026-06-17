@@ -27,6 +27,7 @@ class FrameRelayService:
         send_interval_seconds: float,
         frame_provider: Callable[[], tuple[bool, Any | None, int | str | None]],
         on_frame_received: Callable[[Image.Image], None] | None = None,
+        send_enabled: bool = True,
     ) -> None:
         """Store the transport endpoints and callbacks."""
 
@@ -37,6 +38,7 @@ class FrameRelayService:
         self.send_interval_seconds = send_interval_seconds
         self.frame_provider = frame_provider
         self.on_frame_received = on_frame_received
+        self.send_enabled = send_enabled
         self._incoming_frames: queue.Queue[bytes] = queue.Queue(maxsize=10)
         self._receive_stop_event = threading.Event()
         self._send_stop_event = threading.Event()
@@ -55,7 +57,7 @@ class FrameRelayService:
             self._receive_thread = threading.Thread(target=self._receive_loop, daemon=True)
             self._receive_thread.start()
 
-        if self._send_thread is None or not self._send_thread.is_alive():
+        if self.send_enabled and (self._send_thread is None or not self._send_thread.is_alive()):
             self._send_stop_event.clear()
             self._send_thread = threading.Thread(target=self._send_loop, daemon=True)
             self._send_thread.start()
@@ -134,6 +136,9 @@ class FrameRelayService:
 
     def _send_loop(self) -> None:
         """Keep sending the primary local frame to the configured peer."""
+
+        if not self.send_enabled:
+            return
 
         while not self._send_stop_event.is_set():
             if self._send_socket is None:
