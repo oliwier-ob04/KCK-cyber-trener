@@ -700,21 +700,37 @@ class CyberTrainerView(tk.Tk):
         card = tk.Frame(parent, bg="#0d1527", highlightthickness=1, highlightbackground="#27324a", bd=0)
         card.pack(fill="both", expand=True, padx=6, pady=6)
 
-        tk.Label(card, text="Ustawienia", bg="#0d1527", fg="#f5fbff", font=("Segoe UI", 20, "bold")).pack(anchor="w", padx=20, pady=(18, 4))
+        scroll_canvas = tk.Canvas(card, bg="#0d1527", highlightthickness=0, bd=0)
+        scroll_canvas.pack(side="left", fill="both", expand=True)
+        scrollbar = ttk.Scrollbar(card, orient="vertical", command=scroll_canvas.yview)
+        scrollbar.pack(side="right", fill="y")
+        scroll_canvas.configure(yscrollcommand=scrollbar.set)
+
+        content = tk.Frame(scroll_canvas, bg="#0d1527")
+        content_window = scroll_canvas.create_window((0, 0), window=content, anchor="nw")
+
+        def _sync_settings_scroll_region(_event: tk.Event | None = None) -> None:
+            scroll_canvas.configure(scrollregion=scroll_canvas.bbox("all"))
+            scroll_canvas.itemconfigure(content_window, width=scroll_canvas.winfo_width())
+
+        content.bind("<Configure>", _sync_settings_scroll_region)
+        scroll_canvas.bind("<Configure>", _sync_settings_scroll_region)
+
+        tk.Label(content, text="Ustawienia", bg="#0d1527", fg="#f5fbff", font=("Segoe UI", 20, "bold")).pack(anchor="w", padx=20, pady=(18, 4))
         tk.Label(
-            card,
+            content,
             text="Dostosuj tolerancję przodu, boku nogi i boku pleców oraz przypisanie kamer do widoków.",
             bg="#0d1527",
             fg="#8aa0bf",
             font=("Segoe UI", 10),
         ).pack(anchor="w", padx=20, pady=(0, 14))
 
-        status_box = tk.Frame(card, bg="#10192c", highlightthickness=1, highlightbackground="#314058", bd=0)
+        status_box = tk.Frame(content, bg="#10192c", highlightthickness=1, highlightbackground="#314058", bd=0)
         status_box.pack(fill="x", padx=16, pady=(0, 12))
         tk.Label(status_box, text="Status kamer", bg="#10192c", fg="#dbe7f6", font=("Segoe UI", 10, "bold")).pack(anchor="w", padx=14, pady=(12, 6))
         tk.Label(status_box, textvariable=self.connection_label, bg="#10192c", fg="#9eb0c9", font=("Segoe UI", 10), wraplength=760, justify="left").pack(anchor="w", padx=14, pady=(0, 12))
 
-        tolerance_box = tk.Frame(card, bg="#10192c", highlightthickness=1, highlightbackground="#314058", bd=0)
+        tolerance_box = tk.Frame(content, bg="#10192c", highlightthickness=1, highlightbackground="#314058", bd=0)
         tolerance_box.pack(fill="x", padx=16, pady=(0, 12))
         tk.Label(tolerance_box, text="Kąt dopuszczalny (± stopni)", bg="#10192c", fg="#dbe7f6", font=("Segoe UI", 10, "bold")).pack(anchor="w", padx=14, pady=(12, 8))
         front_card = tk.Frame(tolerance_box, bg="#0f1a2f", highlightthickness=1, highlightbackground="#314058", bd=0)
@@ -927,7 +943,7 @@ class CyberTrainerView(tk.Tk):
         back_entry.bind("<Return>", lambda event: self._apply_tolerance_from_entry("side_back", event))
         back_entry.bind("<FocusOut>", lambda event: self._apply_tolerance_from_entry("side_back", event))
 
-        voice_box = tk.Frame(card, bg="#10192c", highlightthickness=1, highlightbackground="#314058", bd=0)
+        voice_box = tk.Frame(content, bg="#10192c", highlightthickness=1, highlightbackground="#314058", bd=0)
         voice_box.pack(fill="x", padx=16, pady=(0, 12))
         voice_label = tk.Label(voice_box, text="Komunikaty głosowe", bg="#10192c", fg="#dbe7f6", font=("Segoe UI", 10, "bold"))
         voice_label.pack(anchor="w", padx=14, pady=(12, 8))
@@ -949,7 +965,7 @@ class CyberTrainerView(tk.Tk):
         )
         voice_checkbox.pack(anchor="w")
 
-        sources_box = tk.Frame(card, bg="#10192c", highlightthickness=1, highlightbackground="#314058", bd=0)
+        sources_box = tk.Frame(content, bg="#10192c", highlightthickness=1, highlightbackground="#314058", bd=0)
         sources_box.pack(fill="x", padx=16, pady=(0, 14))
         tk.Label(sources_box, text="Przypisanie kamer do widoków", bg="#10192c", fg="#dbe7f6", font=("Segoe UI", 10, "bold")).pack(anchor="w", padx=14, pady=(12, 8))
 

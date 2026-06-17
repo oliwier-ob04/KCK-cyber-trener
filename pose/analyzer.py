@@ -157,7 +157,6 @@ class MovementAnalyzer:
 
         # Rysowanie tekstu na obrazie
         line_color = (34, 197, 94) if angle_diff <= self.front_tolerance_degrees else (59, 68, 239)
-        cv2.putText(frame, f"Roznica: {angle_diff:.1f}*", (50, 90), cv2.FONT_HERSHEY_SIMPLEX, 0.7, line_color, 2)
 
         return PoseMetrics(
             pose_detected=True,
