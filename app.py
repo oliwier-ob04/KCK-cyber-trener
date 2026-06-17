@@ -30,15 +30,18 @@ class HistoryEntry:
     """Formatted session row shown in the history list."""
 
     repetitions: int
-    duration_seconds: int
-    quality: int
+    avg_quality: float
+    avg_rep_time_seconds: float
+    total_series_seconds: int
     source: str
 
     def format(self) -> str:
         """Render the history entry as a compact one-line label."""
         return (
-            f"{self.repetitions:02d} powt. | {self.duration_seconds}s | "
-            f"{self.quality}% | {self.source}"
+            f"{self.repetitions:02d} powt. | "
+            f"Śr. jakość {self.avg_quality:.1f}% | "
+            f"Śr. czas {self.avg_rep_time_seconds:.2f}s | "
+            f"Czas serii {format_elapsed_seconds(self.total_series_seconds)}"
         )
 
 
@@ -79,12 +82,14 @@ class CyberTrainerApp:
         self._rep_anchor_elapsed: float | None = None
         self._rep_count = 0
         self._tempo_samples: list[float] = []
+        self._quality_samples: list[int] = []
         self._last_pose_zone = "unknown"
         self._latest_pose_metrics = PoseMetrics(False)
         self._last_camera_scan_at = 0.0
         self._remote_frame: Image.Image | None = None
         self._remote_frame_lock = threading.Lock()
         self._gesture_toggle_block_until = 0.0
+        self._auto_paused_by_navigation = False
         self.voice = VoiceFeedback(min_interval_seconds=1.8, enabled=self.config.voice_feedback_enabled)
         self._last_instruction_at = 0.0
 
@@ -114,6 +119,7 @@ class CyberTrainerApp:
                 on_camera_source_changed=self._on_camera_source_changed,
                 on_angle_tolerance_changed=self._on_angle_tolerance_changed,
                 on_voice_feedback_changed=self._on_voice_feedback_changed,
+                on_nav_section_changed=self._on_nav_section_changed,
             ),
             camera_only=True,
         )
@@ -202,6 +208,7 @@ class CyberTrainerApp:
         self._rep_anchor_elapsed = None
         self._rep_count = 0
         self._tempo_samples = []
+        self._quality_samples = []
         self._last_pose_zone = "unknown"
         
         # Reset zmiennych nowej maszyny stanów przy starcie sesji
@@ -215,6 +222,7 @@ class CyberTrainerApp:
         self._last_calculated_quality = 100
         self._current_rep_issues = set()
         self._top_hold_feedback_sent = False
+        self._auto_paused_by_navigation = False
 
         for analyzer in self.analyzers.values():
             analyzer.reset()
@@ -251,6 +259,7 @@ class CyberTrainerApp:
             return
 
         if self.session_mode == "active":
+            self._auto_paused_by_navigation = False
             self.session_mode = "paused"
             self.session_paused = True
             self.view.set_workout_status("Pauza", "Seria wstrzymana. Czas i tempo nie rosną w trakcie pauzy.")
@@ -260,6 +269,7 @@ class CyberTrainerApp:
             return
 
         if self.session_mode == "paused":
+            self._auto_paused_by_navigation = False
             self.session_mode = "active"
             self.session_paused = False
             self.last_tick = time.time()
@@ -267,6 +277,35 @@ class CyberTrainerApp:
             self.view.set_feedback("Seria wznowiona.")
             self.view.set_primary_action_label("STOP")
             self.view.append_event("Seria wznowiona")
+
+    def _on_nav_section_changed(self, section: str) -> None:
+        """Auto-pause outside Training tab and auto-resume when returning."""
+
+        if section != "Trening":
+            if self.session_mode == "active":
+                self.session_mode = "paused"
+                self.session_paused = True
+                self.view.set_workout_status("Pauza", "Seria wstrzymana po przejściu do innej zakładki.")
+                self.view.set_feedback("Seria wstrzymana (inna zakładka).")
+                self.view.set_primary_action_label("START")
+                self.view.append_event("Auto-pauza: zmieniono zakładkę")
+                self._auto_paused_by_navigation = True
+            return
+
+        if (
+            section == "Trening"
+            and self._auto_paused_by_navigation
+            and self.session_mode == "paused"
+            and self.session_started_at > 0
+        ):
+            self.session_mode = "active"
+            self.session_paused = False
+            self.last_tick = time.time()
+            self.view.set_workout_status("Aktywna", "Seria wznowiona po powrocie do zakładki Trening.")
+            self.view.set_feedback("Seria wznowiona.")
+            self.view.set_primary_action_label("STOP")
+            self.view.append_event("Auto-wznowienie: powrót do zakładki Trening")
+            self._auto_paused_by_navigation = False
 
     def _set_gesture_toggle_block(self, seconds: float = 1.0) -> None:
         """Prevent immediate gesture re-triggering after a state change."""
@@ -284,6 +323,7 @@ class CyberTrainerApp:
         self.session_mode = "idle"
         self.session_active = False
         self.session_paused = False
+        self._auto_paused_by_navigation = False
         self._set_gesture_toggle_block()
         self.view.set_workout_status("Zakończona", "Jedna dłoń nad głową = start, dwie dłonie = stop.")
         self.view.set_feedback("Seria zakończona.")
@@ -292,6 +332,40 @@ class CyberTrainerApp:
         self.voice.say("Seria zakończona.")
         self._update_camera_status()
         self.save_result(auto=True)
+        self._show_session_summary_popup()
+
+    def _show_session_summary_popup(self) -> None:
+        """Show a final session summary popup with key workout averages."""
+
+        reps, avg_quality, avg_rep_time, total_series_seconds = self._session_summary_values()
+        total_series_text = format_elapsed_seconds(int(total_series_seconds))
+        self.view.show_session_summary_popup(
+            repetitions=reps,
+            avg_quality=avg_quality,
+            avg_rep_time_seconds=avg_rep_time,
+            total_series_text=total_series_text,
+        )
+
+    def _session_summary_values(self) -> tuple[int, float, float, float]:
+        """Return reps, average quality, average rep time and total series duration."""
+
+        reps = self._rep_count
+        if self._quality_samples:
+            avg_quality = sum(self._quality_samples) / len(self._quality_samples)
+        else:
+            avg_quality = float(self.scorer.snapshot().quality)
+
+        if self._tempo_samples:
+            avg_rep_time = sum(self._tempo_samples) / len(self._tempo_samples)
+        else:
+            avg_rep_time = 0.0
+
+        if self.session_started_at > 0:
+            total_series_seconds = max(0.0, time.time() - self.session_started_at)
+        else:
+            total_series_seconds = 0.0
+
+        return reps, avg_quality, avg_rep_time, total_series_seconds
 
     def save_result(self, auto: bool = False) -> None:
         """Persist the current session snapshot in the local JSON history."""
@@ -300,12 +374,16 @@ class CyberTrainerApp:
 
         now = time.time()
         snapshot = self.scorer.snapshot()
+        reps, avg_quality, avg_rep_time, total_series_seconds = self._session_summary_values()
         result = SessionResult(
             started_at=self.session_started_at,
             ended_at=now,
-            repetitions=snapshot.repetitions,
+            repetitions=reps,
             warnings=snapshot.warnings,
             quality=snapshot.quality,
+            avg_quality=avg_quality,
+            avg_rep_time_seconds=avg_rep_time,
+            total_series_seconds=int(total_series_seconds),
             source=self.view.source_label.get(),
         )
         try:
@@ -423,16 +501,36 @@ class CyberTrainerApp:
     def _load_history(self) -> None:
         """Load the local history file and refresh the sidebar list."""
         items = self.store.load()
-        entries = [
-            HistoryEntry(
-                repetitions=int(item.get("repetitions", 0)),
-                duration_seconds=int(item.get("duration_seconds", 0)),
-                quality=int(item.get("quality", 0)),
-                source=str(item.get("source", "unknown")),
-            ).format()
-            for item in items[: self.config.history_limit]
-        ]
+        entries: list[str] = []
+        history_records: list[dict[str, str]] = []
+        for item in items[: self.config.history_limit]:
+            reps = int(item.get("repetitions", 0))
+            total_series_seconds = int(item.get("total_series_seconds", item.get("duration_seconds", 0)))
+            avg_quality = float(item.get("avg_quality", item.get("quality", 0)))
+            avg_rep_time_seconds = float(item.get("avg_rep_time_seconds", 0.0))
+            if avg_rep_time_seconds <= 0.0 and reps > 0 and total_series_seconds > 0:
+                avg_rep_time_seconds = total_series_seconds / reps
+
+            entries.append(
+                HistoryEntry(
+                    repetitions=reps,
+                    avg_quality=avg_quality,
+                    avg_rep_time_seconds=avg_rep_time_seconds,
+                    total_series_seconds=total_series_seconds,
+                    source=str(item.get("source", "unknown")),
+                ).format()
+            )
+            history_records.append(
+                {
+                    "repetitions": str(reps),
+                    "avg_quality": f"{avg_quality:.1f}%",
+                    "avg_rep_time": f"{avg_rep_time_seconds:.2f} s",
+                    "total_series_time": format_elapsed_seconds(total_series_seconds),
+                    "source": str(item.get("source", "unknown")),
+                }
+            )
         self.view.set_history(entries)
+        self.view.set_history_records(history_records)
 
     def _refresh_camera_sources(self, force: bool = False) -> None:
         """Rescan local devices and keep the UI comboboxes in sync."""
@@ -709,6 +807,7 @@ class CyberTrainerApp:
 
                         self._rep_count = self.scorer.repetitions
                         self._last_calculated_quality = self.scorer.quality
+                        self._quality_samples.append(self.scorer.quality)
                         repetition_event = True
 
                         rep_duration = max(0.01, self.session_elapsed - self._rep_started_elapsed)
@@ -760,7 +859,10 @@ class CyberTrainerApp:
 
     def _update_loop(self) -> None:
         """Run one UI tick and reschedule the next frame."""
-        pose_metrics = self._update_camera_panels()
+        if self.view.is_training_section_active():
+            pose_metrics = self._update_camera_panels()
+        else:
+            pose_metrics = PoseMetrics(False)
         self._update_metrics(pose_metrics)
         self.view.after(self.config.update_interval_ms, self._update_loop)
 

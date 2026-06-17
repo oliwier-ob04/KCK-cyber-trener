@@ -27,6 +27,7 @@ class ViewCallbacks:
     on_camera_source_changed: Callable[[int, str], None]
     on_angle_tolerance_changed: Callable[[str, float], None]
     on_voice_feedback_changed: Callable[[bool], None]
+    on_nav_section_changed: Callable[[str], None]
 
 
 @dataclass
@@ -79,7 +80,7 @@ class CyberTrainerView(tk.Tk):
         self.technique_knee_value = tk.StringVar(value="stabilne")
         self.technique_knee_color = self.config.accent_green
         self.technique_knee_label_widget = None
-        self.nav_sections = ["Trening", "Analiza", "Historia", "Postępy", "Ustawienia"]
+        self.nav_sections = ["Trening", "Historia", "Postępy", "Ustawienia"]
         self.active_nav_section = tk.StringVar(value="Trening")
         self._nav_buttons: dict[str, tk.Button] = {}
         self.left_panel_width = 230
@@ -150,6 +151,11 @@ class CyberTrainerView(tk.Tk):
 
         self.primary_action_label.set(text)
 
+    def is_training_section_active(self) -> bool:
+        """Return True when the currently selected navigation section is Trening."""
+
+        return self.active_nav_section.get() == "Trening"
+
     def set_pose_metrics(self, pose_metrics) -> None:
         """Render the latest pose-derived metrics into the right-side panel."""
 
@@ -203,17 +209,159 @@ class CyberTrainerView(tk.Tk):
     def set_history(self, entries: Sequence[str]) -> None:
         """Replace the history list with formatted session entries."""
 
-        # history_box may not exist in camera-only mode; store entries for later
-        if not hasattr(self, "history_box") or self.camera_only:
-            self._pending_history = list(entries)
+        rendered = list(entries)
+        if not rendered:
+            rendered = ["Brak zapisanej historii"]
+
+        updated_any_widget = False
+
+        if hasattr(self, "history_box") and not self.camera_only:
+            self.history_box.delete(0, tk.END)
+            for entry in rendered:
+                self.history_box.insert(tk.END, entry)
+            updated_any_widget = True
+
+        if hasattr(self, "history_page_box"):
+            self.history_page_box.delete(0, tk.END)
+            for entry in rendered:
+                self.history_page_box.insert(tk.END, entry)
+            updated_any_widget = True
+
+        if not updated_any_widget:
+            self._pending_history = rendered
+
+    def set_history_records(self, records: Sequence[dict[str, str]]) -> None:
+        """Render structured history records as cards on the history page."""
+
+        rendered = list(records)
+        self._pending_history_records = rendered
+        if not hasattr(self, "_history_cards_frame"):
             return
 
-        self.history_box.delete(0, tk.END)
-        if not entries:
-            self.history_box.insert(tk.END, "Brak zapisanej historii")
+        for child in self._history_cards_frame.winfo_children():
+            child.destroy()
+
+        if not rendered:
+            empty = tk.Label(
+                self._history_cards_frame,
+                text="Brak zapisanej historii",
+                bg="#0f172a",
+                fg="#9fb3cf",
+                font=("Segoe UI", 12),
+                pady=16,
+            )
+            empty.pack(fill="x", padx=6, pady=6)
             return
-        for entry in entries:
-            self.history_box.insert(tk.END, entry)
+
+        for index, record in enumerate(rendered, start=1):
+            card = tk.Frame(self._history_cards_frame, bg="#10192c", highlightthickness=1, highlightbackground="#314058", bd=0)
+            card.pack(fill="x", padx=6, pady=(0, 10))
+
+            header = tk.Frame(card, bg="#13213a")
+            header.pack(fill="x")
+            tk.Label(
+                header,
+                text=f"Seria {index}",
+                bg="#13213a",
+                fg="#f8fafc",
+                font=("Segoe UI", 11, "bold"),
+            ).pack(side="left", padx=12, pady=8)
+            tk.Label(
+                header,
+                text=f"Źródło: {record.get('source', 'unknown')}",
+                bg="#13213a",
+                fg="#a8c1df",
+                font=("Segoe UI", 9),
+            ).pack(side="right", padx=12, pady=8)
+
+            body = tk.Frame(card, bg="#10192c")
+            body.pack(fill="x", padx=12, pady=10)
+
+            for label, value in [
+                ("Powtórzenia", record.get("repetitions", "0")),
+                ("Średnia jakość", record.get("avg_quality", "0.0%")),
+                ("Średni czas powtórzenia", record.get("avg_rep_time", "0.00 s")),
+                ("Całkowity czas serii", record.get("total_series_time", "00:00")),
+            ]:
+                row = tk.Frame(body, bg="#10192c")
+                row.pack(fill="x", pady=2)
+                tk.Label(row, text=label, bg="#10192c", fg="#9fb3cf", font=("Segoe UI", 10)).pack(side="left")
+                tk.Label(row, text=value, bg="#10192c", fg="#f1f7ff", font=("Segoe UI", 10, "bold")).pack(side="right")
+
+        self._history_cards_frame.update_idletasks()
+        if hasattr(self, "_history_canvas"):
+            self._history_canvas.configure(scrollregion=self._history_canvas.bbox("all"))
+
+    def show_session_summary_popup(
+        self,
+        repetitions: int,
+        avg_quality: float,
+        avg_rep_time_seconds: float,
+        total_series_text: str,
+    ) -> None:
+        """Display a themed session summary popup aligned with the app style."""
+
+        popup = tk.Toplevel(self)
+        popup.title("Podsumowanie treningu")
+        popup.transient(self)
+        popup.grab_set()
+        popup.configure(bg="#0b1220")
+        popup.resizable(False, False)
+
+        card = tk.Frame(popup, bg="#0f172a", highlightthickness=1, highlightbackground="#314058", bd=0)
+        card.pack(fill="both", expand=True, padx=16, pady=16)
+
+        tk.Label(
+            card,
+            text="Gratulacje!",
+            bg="#0f172a",
+            fg="#f8fafc",
+            font=("Segoe UI", 22, "bold"),
+        ).pack(anchor="w", padx=18, pady=(16, 2))
+        tk.Label(
+            card,
+            text="Podsumowanie zakończonej serii",
+            bg="#0f172a",
+            fg="#9fb3cf",
+            font=("Segoe UI", 10),
+        ).pack(anchor="w", padx=18, pady=(0, 12))
+
+        metrics = tk.Frame(card, bg="#10192c", highlightthickness=1, highlightbackground="#314058", bd=0)
+        metrics.pack(fill="x", padx=18, pady=(0, 12))
+
+        for label, value in [
+            ("Liczba powtórzeń", str(repetitions)),
+            ("Średnia jakość", f"{avg_quality:.1f}%"),
+            ("Średni czas powtórzenia", f"{avg_rep_time_seconds:.2f} s"),
+            ("Całkowity czas serii", total_series_text),
+        ]:
+            row = tk.Frame(metrics, bg="#10192c")
+            row.pack(fill="x", padx=12, pady=6)
+            tk.Label(row, text=label, bg="#10192c", fg="#9fb3cf", font=("Segoe UI", 10)).pack(side="left")
+            tk.Label(row, text=value, bg="#10192c", fg="#f1f7ff", font=("Segoe UI", 11, "bold")).pack(side="right")
+
+        tk.Button(
+            card,
+            text="Zamknij",
+            command=popup.destroy,
+            bg="#22c55e",
+            fg="#08111f",
+            activebackground="#2dd06c",
+            activeforeground="#08111f",
+            relief="flat",
+            bd=0,
+            font=("Segoe UI", 10, "bold"),
+            padx=16,
+            pady=8,
+        ).pack(anchor="e", padx=18, pady=(0, 16))
+
+        popup.update_idletasks()
+        width = popup.winfo_reqwidth()
+        height = popup.winfo_reqheight()
+        x = self.winfo_rootx() + (self.winfo_width() - width) // 2
+        y = self.winfo_rooty() + (self.winfo_height() - height) // 2
+        popup.geometry(f"{width}x{height}+{max(0, x)}+{max(0, y)}")
+        popup.focus_set()
 
     def append_event(self, message: str) -> None:
         """Push a new message into the event log."""
@@ -351,6 +499,11 @@ class CyberTrainerView(tk.Tk):
         self._settings_page.place(relx=0.5, rely=0.5, anchor="center", width=target_w, height=total_h)
         self._build_settings_page(self._settings_page)
         self._settings_page.place_forget()
+
+        self._history_page = tk.Frame(self._page_container, bg=self.config.background_color)
+        self._history_page.place(relx=0.5, rely=0.5, anchor="center", width=target_w, height=total_h)
+        self._build_history_page(self._history_page)
+        self._history_page.place_forget()
 
         right_panel = tk.Frame(shell, bg="#0d1527", highlightthickness=1, highlightbackground="#27324a", bd=0)
         right_panel.grid(row=0, column=2, sticky="nse", padx=(self.side_gap, 0))
@@ -1003,18 +1156,79 @@ class CyberTrainerView(tk.Tk):
             else:
                 button.configure(bg="#101a30", fg="#d6e1f2", highlightbackground="#2f415a")
 
+        try:
+            self.callbacks.on_nav_section_changed(section)
+        except Exception:
+            pass
+
         if not self.camera_only:
             return
 
-        if not hasattr(self, "_camera_page") or not hasattr(self, "_settings_page"):
+        if not hasattr(self, "_camera_page") or not hasattr(self, "_settings_page") or not hasattr(self, "_history_page"):
             return
 
         if section == "Ustawienia":
             self._camera_page.place_forget()
+            self._history_page.place_forget()
             self._settings_page.place(relx=0.5, rely=0.5, anchor="center", relwidth=1.0, relheight=1.0)
+        elif section == "Historia":
+            self._camera_page.place_forget()
+            self._settings_page.place_forget()
+            self._history_page.place(relx=0.5, rely=0.5, anchor="center", relwidth=1.0, relheight=1.0)
         else:
             self._settings_page.place_forget()
+            self._history_page.place_forget()
             self._camera_page.place(relx=0.5, rely=0.5, anchor="center", relwidth=1.0, relheight=1.0)
+
+    def _build_history_page(self, parent: tk.Frame) -> None:
+        """Build a simple page with saved results from previous workout series."""
+
+        card = tk.Frame(parent, bg="#0f172a", highlightthickness=1, highlightbackground="#314058", bd=0)
+        card.place(relx=0.5, rely=0.5, anchor="center", relwidth=0.96, relheight=0.96)
+
+        tk.Label(
+            card,
+            text="Historia ćwiczeń",
+            bg="#0f172a",
+            fg="#f8fafc",
+            font=("Segoe UI", 18, "bold"),
+        ).pack(anchor="w", padx=18, pady=(18, 4))
+        tk.Label(
+            card,
+            text="Zapisane wyniki poprzednich serii: powtórzenia, średnia jakość, średni czas powtórzenia i całkowity czas serii.",
+            bg="#0f172a",
+            fg="#cbd5e1",
+            font=("Segoe UI", 10),
+            wraplength=920,
+            justify="left",
+        ).pack(anchor="w", padx=18, pady=(0, 12))
+
+        list_wrap = tk.Frame(card, bg="#0f172a")
+        list_wrap.pack(fill="both", expand=True, padx=18, pady=(0, 18))
+
+        self._history_canvas = tk.Canvas(list_wrap, bg="#0f172a", highlightthickness=0, bd=0)
+        scrollbar = ttk.Scrollbar(list_wrap, orient="vertical", command=self._history_canvas.yview)
+        self._history_canvas.configure(yscrollcommand=scrollbar.set)
+        scrollbar.pack(side="right", fill="y")
+        self._history_canvas.pack(side="left", fill="both", expand=True)
+
+        self._history_cards_frame = tk.Frame(self._history_canvas, bg="#0f172a")
+        self._history_window_id = self._history_canvas.create_window((0, 0), window=self._history_cards_frame, anchor="nw")
+
+        def _resize_cards(_event: tk.Event) -> None:
+            width = max(100, self._history_canvas.winfo_width())
+            self._history_canvas.itemconfigure(self._history_window_id, width=width)
+            self._history_canvas.configure(scrollregion=self._history_canvas.bbox("all"))
+
+        self._history_cards_frame.bind("<Configure>", _resize_cards)
+        self._history_canvas.bind("<Configure>", _resize_cards)
+
+        pending = getattr(self, "_pending_history", None)
+        if pending:
+            self.set_history(pending)
+        pending_records = getattr(self, "_pending_history_records", None)
+        if pending_records is not None:
+            self.set_history_records(pending_records)
 
     def _build_main(self, parent: ttk.Frame) -> None:
         """Build the main cards for camera preview, controls, feedback and stats."""

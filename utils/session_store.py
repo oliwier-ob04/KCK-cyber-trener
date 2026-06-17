@@ -18,6 +18,9 @@ class SessionResult:
     warnings: int
     quality: int
     source: str
+    avg_quality: float | None = None
+    avg_rep_time_seconds: float | None = None
+    total_series_seconds: int | None = None
 
     @property
     def duration_seconds(self) -> int:
