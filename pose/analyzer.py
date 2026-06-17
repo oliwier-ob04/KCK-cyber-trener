@@ -22,6 +22,9 @@ class PoseMetrics:
     knee_angle_side: float = float("nan")
     upper_body_angle: float = float("nan")
     hand_raised: bool = False
+    start_gesture: bool = False
+    stop_gesture: bool = False
+    two_hands_visible: bool = False
     message: str = "Brak wykrytej sylwetki"
 
 
@@ -46,12 +49,18 @@ class MovementAnalyzer:
         base_hip_angle: float = 170.0,
         hip_angle_amplitude: float = 8.0,
         history_buffer_size: int = 7,
+        front_tolerance_degrees: float = 10.0,
+        side_tolerance_degrees: float = 10.0,
+        side_back_tolerance_degrees: float = 10.0,
     ) -> None:
         self.phase_speed = phase_speed
         self.repetition_threshold = repetition_threshold
         self.base_hip_angle = base_hip_angle
         self.hip_angle_amplitude = hip_angle_amplitude
         self.history_buffer_size = history_buffer_size
+        self.front_tolerance_degrees = max(1.0, float(front_tolerance_degrees))
+        self.side_tolerance_degrees = max(1.0, float(side_tolerance_degrees))
+        self.side_back_tolerance_degrees = max(1.0, float(side_back_tolerance_degrees))
         
         # Inicjalizacja MediaPipe Pose
         self.mp_pose = mp.solutions.pose
@@ -59,6 +68,18 @@ class MovementAnalyzer:
         self.pose = self.mp_pose.Pose(model_complexity=0)
         
         self.reset()
+
+    def set_tolerances(
+        self,
+        front_tolerance_degrees: float,
+        side_tolerance_degrees: float,
+        side_back_tolerance_degrees: float,
+    ) -> None:
+        """Update live angle tolerances used for line coloring."""
+
+        self.front_tolerance_degrees = max(1.0, float(front_tolerance_degrees))
+        self.side_tolerance_degrees = max(1.0, float(side_tolerance_degrees))
+        self.side_back_tolerance_degrees = max(1.0, float(side_back_tolerance_degrees))
 
     def reset(self) -> None:
         """Resetowanie historii pomiarów."""
@@ -110,7 +131,7 @@ class MovementAnalyzer:
             self._hand_raised_start_time = None
             return False
         
-    def _analyze_front_view(self, frame, landmarks, visibility) -> PoseMetrics:
+    def _analyze_front_view(self, frame, landmarks, visibility, two_hands_visible: bool) -> PoseMetrics:
         """ANALIZA WIDOKU Z PRZODU: Wylicza różnicę kątową nachylenia łydek."""
         left_knee = landmarks[self.mp_pose.PoseLandmark.LEFT_KNEE]
         left_ankle = landmarks[self.mp_pose.PoseLandmark.LEFT_ANKLE]
@@ -120,6 +141,7 @@ class MovementAnalyzer:
         if any(lm.visibility < 0.5 for lm in [left_knee, left_ankle, right_knee, right_ankle]):
             return PoseMetrics(
                 pose_detected=True, side="front", side_name="front", visibility=visibility,
+                two_hands_visible=two_hands_visible,
                 message="FRONT: Cofnij się, aby było widać całe nogi"
             )
 
@@ -128,20 +150,13 @@ class MovementAnalyzer:
         right_calf_angle = math.degrees(math.atan2(right_ankle.x - right_knee.x, right_ankle.y - right_knee.y))
         angle_diff = abs(left_calf_angle - right_calf_angle)
 
-        # Detekcja uniesienia dłoni nad linię barków
-        raw_hand_raised = (
-            (landmarks[self.mp_pose.PoseLandmark.LEFT_WRIST].y < landmarks[self.mp_pose.PoseLandmark.LEFT_SHOULDER].y - 0.05) or
-            (landmarks[self.mp_pose.PoseLandmark.RIGHT_WRIST].y < landmarks[self.mp_pose.PoseLandmark.RIGHT_SHOULDER].y - 0.05)
-        )
-        
-        if self._check_hand_raised_duration(raw_hand_raised):
-            self._hand_raised_start_time = None
-            hand_raised = True
-        else:
-            hand_raised = False
+        left_hand_up = landmarks[self.mp_pose.PoseLandmark.LEFT_WRIST].y < landmarks[self.mp_pose.PoseLandmark.LEFT_SHOULDER].y - 0.05
+        right_hand_up = landmarks[self.mp_pose.PoseLandmark.RIGHT_WRIST].y < landmarks[self.mp_pose.PoseLandmark.RIGHT_SHOULDER].y - 0.05
+        start_gesture = left_hand_up ^ right_hand_up
+        stop_gesture = left_hand_up and right_hand_up
 
         # Rysowanie tekstu na obrazie
-        line_color = (34, 197, 94) if angle_diff < 10.0 else (59, 68, 239)
+        line_color = (34, 197, 94) if angle_diff <= self.front_tolerance_degrees else (59, 68, 239)
         cv2.putText(frame, f"Roznica: {angle_diff:.1f}*", (50, 90), cv2.FONT_HERSHEY_SIMPLEX, 0.7, line_color, 2)
 
         return PoseMetrics(
@@ -150,11 +165,14 @@ class MovementAnalyzer:
             side_name="front",
             visibility=visibility,
             knee_angle_front=angle_diff,
-            hand_raised=hand_raised,
+            hand_raised=start_gesture,
+            start_gesture=start_gesture,
+            stop_gesture=stop_gesture,
+            two_hands_visible=two_hands_visible,
             message="FRONT: Analiza poprawna"
         )
 
-    def _analyze_side_view(self, side_name, landmarks, visibility) -> PoseMetrics:
+    def _analyze_side_view(self, side_name, landmarks, visibility, two_hands_visible: bool) -> PoseMetrics:
         """ANALIZA WIDOKU Z BOKU: Liczy kąt tułowia oraz kąt łydki względem podłoża."""
         if side_name == "left":
             shoulder = landmarks[self.mp_pose.PoseLandmark.LEFT_SHOULDER]
@@ -185,13 +203,15 @@ class MovementAnalyzer:
             raw_knee_side = float("nan")
             
         knee_angle_side = self._smooth_angle(self._knee_angle_history, raw_knee_side)
-        raw_hand_raised = shoulder.visibility > 0.4 and wrist.visibility > 0.4 and wrist.y < shoulder.y - 0.05
-        
-        if self._check_hand_raised_duration(raw_hand_raised):
-            self._hand_raised_start_time = None
-            hand_raised = True
-        else:
-            hand_raised = False
+        left_shoulder = landmarks[self.mp_pose.PoseLandmark.LEFT_SHOULDER]
+        right_shoulder = landmarks[self.mp_pose.PoseLandmark.RIGHT_SHOULDER]
+        left_wrist = landmarks[self.mp_pose.PoseLandmark.LEFT_WRIST]
+        right_wrist = landmarks[self.mp_pose.PoseLandmark.RIGHT_WRIST]
+
+        left_hand_up = left_wrist.visibility > 0.4 and left_shoulder.visibility > 0.4 and left_wrist.y < left_shoulder.y - 0.05
+        right_hand_up = right_wrist.visibility > 0.4 and right_shoulder.visibility > 0.4 and right_wrist.y < right_shoulder.y - 0.05
+        start_gesture = left_hand_up ^ right_hand_up
+        stop_gesture = left_hand_up and right_hand_up
 
         return PoseMetrics(
             pose_detected=True,
@@ -200,7 +220,10 @@ class MovementAnalyzer:
             visibility=visibility,
             knee_angle_side=knee_angle_side,
             upper_body_angle=upper_body_angle,
-            hand_raised=hand_raised,
+            hand_raised=start_gesture,
+            start_gesture=start_gesture,
+            stop_gesture=stop_gesture,
+            two_hands_visible=two_hands_visible,
             message=f"BOK ({side_name.upper()}): Analiza poprawna"
         )
         
@@ -229,6 +252,9 @@ class MovementAnalyzer:
 
                 dominant_side = max(sides, key=sides.get)
                 visibility = sides[dominant_side]
+                left_wrist = landmarks[self.mp_pose.PoseLandmark.LEFT_WRIST]
+                right_wrist = landmarks[self.mp_pose.PoseLandmark.RIGHT_WRIST]
+                two_hands_visible = left_wrist.visibility > 0.5 and right_wrist.visibility > 0.5
                 
                 if abs(sides["left"] - sides["right"]) < 0.1:
                     side_name = "front"
@@ -236,9 +262,9 @@ class MovementAnalyzer:
                     side_name = dominant_side
 
                 if side_name == "front":
-                    metrics = self._analyze_front_view(frame_copy, landmarks, visibility)
+                    metrics = self._analyze_front_view(frame_copy, landmarks, visibility, two_hands_visible)
                 else:
-                    metrics = self._analyze_side_view(side_name, landmarks, visibility)
+                    metrics = self._analyze_side_view(side_name, landmarks, visibility, two_hands_visible)
 
                 self._draw_key_overlay(frame_copy, metrics, landmarks)
                 
@@ -260,7 +286,7 @@ class MovementAnalyzer:
             color_joint = (0, 0, 255)
             
             if metrics.side == "front":
-                calf_color = (34, 197, 94) if metrics.knee_angle_front < 10.0 else (59, 68, 239)
+                calf_color = (34, 197, 94) if metrics.knee_angle_front <= self.front_tolerance_degrees else (59, 68, 239)
                 for prefix in ("LEFT", "RIGHT"):
                     kn = landmarks[getattr(self.mp_pose.PoseLandmark, f"{prefix}_KNEE")]
                     an = landmarks[getattr(self.mp_pose.PoseLandmark, f"{prefix}_ANKLE")]
@@ -277,17 +303,17 @@ class MovementAnalyzer:
 
                 hip_angle = metrics.upper_body_angle
                 if not math.isnan(hip_angle):
-                    if 175.0 <= hip_angle <= 185.0:
-                        color_hip_line = (34, 197, 94)    # Zielony (180 +/- 5)
-                    elif 85.0 <= hip_angle < 175.0:
-                        color_hip_line = (0, 165, 255)    # Pomarańczowy
+                    if abs(hip_angle - 180.0) <= self.side_back_tolerance_degrees:
+                        color_hip_line = (34, 197, 94)
+                    elif hip_angle >= 90.0:
+                        color_hip_line = (0, 165, 255)
                     else:
-                        color_hip_line = (59, 68, 239)    # Czerwony
+                        color_hip_line = (59, 68, 239)
                 else:
                     color_hip_line = (255, 255, 255)     # Biały, jeśli brak danych
 
                 knee_angle = metrics.knee_angle_side
-                if not math.isnan(knee_angle) and (85.0 <= knee_angle <= 95.0):
+                if not math.isnan(knee_angle) and abs(knee_angle - 90.0) <= self.side_tolerance_degrees:
                     color_calf_line = (34, 197, 94)   # Zielony
                 else:
                     color_calf_line = (0, 255, 255)

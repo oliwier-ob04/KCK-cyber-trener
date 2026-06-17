@@ -19,11 +19,13 @@ class ViewCallbacks:
     """Callbacks injected from the controller layer."""
 
     on_start_session: Callable[[], None]
+    on_primary_action: Callable[[], None]
     on_toggle_pause: Callable[[], None]
     on_end_session: Callable[[], None]
     on_save_result: Callable[[], None]
     on_close: Callable[[], None]
     on_camera_source_changed: Callable[[int, str], None]
+    on_angle_tolerance_changed: Callable[[str, float], None]
 
 
 @dataclass
@@ -87,7 +89,8 @@ class CyberTrainerView(tk.Tk):
         self._camera_photos: dict[int, object] = {}
         self._panels: list[CameraPanelWidgets] = []
         self.workout_state = tk.StringVar(value="Gotowy")
-        self.workout_hint = tk.StringVar(value="Naciśnij Start albo unieś rękę, aby rozpocząć ustawianie pozycji startowej.")
+        self.workout_hint = tk.StringVar(value="Jedna dłoń nad głową = start, dwie dłonie = stop.")
+        self.primary_action_label = tk.StringVar(value="START")
         self.pose_side = tk.StringVar(value="--")
         
         # Kąty kolan (przód i bok)
@@ -100,6 +103,15 @@ class CyberTrainerView(tk.Tk):
         self.elapsed_text = tk.StringVar(value="00:00")
         self.rep_count_text = tk.StringVar(value="0")
         self.hand_signal_text = tk.StringVar(value="Ręka: --")
+        self.front_tolerance_var = tk.StringVar(value=f"{self.config.front_tolerance_degrees:.1f}")
+        self.side_tolerance_var = tk.StringVar(value=f"{self.config.side_tolerance_degrees:.1f}")
+        self.side_back_tolerance_var = tk.StringVar(value=f"{self.config.side_back_tolerance_degrees:.1f}")
+        self.front_tolerance_scale = tk.DoubleVar(value=self.config.front_tolerance_degrees)
+        self.side_tolerance_scale = tk.DoubleVar(value=self.config.side_tolerance_degrees)
+        self.side_back_tolerance_scale = tk.DoubleVar(value=self.config.side_back_tolerance_degrees)
+        self._suspend_tolerance_callbacks = False
+        self._settings_camera_vars: list[tk.StringVar] = []
+        self._settings_camera_boxes: list[ttk.Combobox] = []
         self._build_ui()
 
     def set_connection_status(self, text: str) -> None:
@@ -130,6 +142,11 @@ class CyberTrainerView(tk.Tk):
 
         self.workout_state.set(state)
         self.workout_hint.set(hint)
+
+    def set_primary_action_label(self, text: str) -> None:
+        """Update the main action button label."""
+
+        self.primary_action_label.set(text)
 
     def set_pose_metrics(self, pose_metrics) -> None:
         """Render the latest pose-derived metrics into the right-side panel."""
@@ -222,6 +239,26 @@ class CyberTrainerView(tk.Tk):
                 selected = "Brak"
             panel.picker_var.set(selected)
 
+        for box, variable, selected in zip(self._settings_camera_boxes, self._settings_camera_vars, selected_labels, strict=False):
+            box.configure(values=list(options))
+            if selected not in options:
+                selected = "Brak"
+            variable.set(selected)
+
+    def set_angle_tolerances(self, front_tolerance: float, side_tolerance: float, side_back_tolerance: float) -> None:
+        """Update editable tolerance values shown in the settings page."""
+
+        self._suspend_tolerance_callbacks = True
+        try:
+            self.front_tolerance_var.set(f"{front_tolerance:.1f}")
+            self.side_tolerance_var.set(f"{side_tolerance:.1f}")
+            self.side_back_tolerance_var.set(f"{side_back_tolerance:.1f}")
+            self.front_tolerance_scale.set(front_tolerance)
+            self.side_tolerance_scale.set(side_tolerance)
+            self.side_back_tolerance_scale.set(side_back_tolerance)
+        finally:
+            self._suspend_tolerance_callbacks = False
+
     def get_camera_panel(self, slot_index: int) -> CameraPanelWidgets:
         """Return a camera panel reference by slot index."""
 
@@ -279,7 +316,12 @@ class CyberTrainerView(tk.Tk):
         center_panel.grid_propagate(False)
         self._camera_center_panel = center_panel
 
-        canvas = tk.Canvas(center_panel, bg=self.config.background_color, highlightthickness=0)
+        self._page_container = tk.Frame(center_panel, bg=self.config.background_color)
+        self._page_container.place(relx=0.5, rely=0.5, anchor="center", width=target_w, height=total_h)
+
+        self._camera_page = tk.Frame(self._page_container, bg=self.config.background_color)
+        self._camera_page.place(relx=0.5, rely=0.5, anchor="center", width=target_w, height=total_h)
+        canvas = tk.Canvas(self._camera_page, bg=self.config.background_color, highlightthickness=0)
         canvas.place(relx=0.5, rely=0.5, anchor="center", width=target_w, height=total_h)
 
         radius = getattr(self.config, "camera_corner_radius", 16)
@@ -302,6 +344,11 @@ class CyberTrainerView(tk.Tk):
         canvas.create_window(target_w // 2, total_h // 2, window=inner_frame, width=inner_w, height=inner_h)
         self._camera_container = canvas
         self._build_camera_card(inner_frame)
+
+        self._settings_page = tk.Frame(self._page_container, bg=self.config.background_color)
+        self._settings_page.place(relx=0.5, rely=0.5, anchor="center", width=target_w, height=total_h)
+        self._build_settings_page(self._settings_page)
+        self._settings_page.place_forget()
 
         right_panel = tk.Frame(shell, bg="#0d1527", highlightthickness=1, highlightbackground="#27324a", bd=0)
         right_panel.grid(row=0, column=2, sticky="nse", padx=(self.side_gap, 0))
@@ -350,6 +397,8 @@ class CyberTrainerView(tk.Tk):
             target_w, total_h = self._fit_camera_window()
             try:
                 self._camera_container.place_configure(width=target_w, height=total_h)
+                if hasattr(self, "_page_container"):
+                    self._page_container.place_configure(width=target_w, height=total_h)
                 if hasattr(self, "_camera_center_panel"):
                     self._camera_center_panel.configure(width=target_w, height=total_h)
                 if hasattr(self, "_camera_shell"):
@@ -512,12 +561,9 @@ class CyberTrainerView(tk.Tk):
                 )
                 btn.pack(fill="x", padx=14, pady=5)
                 self._nav_buttons[label] = btn
-
-            tk.Label(inner, text="Kamera", bg=bg, fg="#dbe7f6", font=("Segoe UI", 10, "bold")).pack(anchor="w", padx=16, pady=(12, 6))
-            tk.Label(inner, textvariable=self.connection_label, bg=bg, fg="#9eb0c9", font=("Segoe UI", 9), wraplength=180, justify="left").pack(anchor="w", padx=16, pady=(0, 10))
             tk.Label(inner, textvariable=self.active_nav_section, bg="#14233a", fg="#7ef0ff", font=("Segoe UI", 9, "bold"), padx=12, pady=5).pack(anchor="w", padx=16, pady=(0, 12))
 
-            self._set_nav_section("Trening")
+            self._set_nav_section(self.active_nav_section.get())
 
         panel.bind("<Configure>", lambda _event: draw_panel())
         draw_panel()
@@ -550,6 +596,21 @@ class CyberTrainerView(tk.Tk):
             tk.Label(inner, textvariable=self.workout_state, bg=bg, fg="#2ee6a6", font=("Segoe UI", 12, "bold")).pack(anchor="w", padx=16, pady=(16, 2))
             tk.Label(inner, textvariable=self.workout_hint, bg=bg, fg="#8aa0bf", font=("Segoe UI", 9), wraplength=270, justify="left").pack(anchor="w", padx=16, pady=(0, 14))
 
+            tk.Button(
+                inner,
+                textvariable=self.primary_action_label,
+                command=self.callbacks.on_primary_action,
+                bg="#1a8cff",
+                fg="#ffffff",
+                activebackground="#2f98ff",
+                activeforeground="#ffffff",
+                relief="flat",
+                bd=0,
+                font=("Segoe UI", 11, "bold"),
+                padx=18,
+                pady=10,
+            ).pack(fill="x", padx=12, pady=(0, 10))
+
             rep_card = tk.Frame(inner, bg="#10192c", highlightthickness=1, highlightbackground="#314058", bd=0)
             rep_card.pack(fill="x", padx=12, pady=(0, 10))
             tk.Label(rep_card, text="POWTÓRZENIA / TEMPO", bg="#10192c", fg="#dbe7f6", font=("Segoe UI", 10, "bold")).pack(anchor="w", padx=14, pady=(12, 2))
@@ -580,6 +641,318 @@ class CyberTrainerView(tk.Tk):
         canvas.bind("<Configure>", lambda _event: draw_panel())
         draw_panel()
 
+    def _update_tolerance(self, axis: str, raw_value: float | str) -> None:
+        """Clamp, render and propagate one tolerance value."""
+
+        if self._suspend_tolerance_callbacks:
+            return
+
+        try:
+            value = float(raw_value)
+        except (TypeError, ValueError):
+            return
+
+        value = max(1.0, min(45.0, value))
+        if axis == "front":
+            self.front_tolerance_scale.set(value)
+            self.front_tolerance_var.set(f"{value:.1f}")
+        elif axis == "side":
+            self.side_tolerance_scale.set(value)
+            self.side_tolerance_var.set(f"{value:.1f}")
+        elif axis == "side_back":
+            self.side_back_tolerance_scale.set(value)
+            self.side_back_tolerance_var.set(f"{value:.1f}")
+        else:
+            return
+
+        self.callbacks.on_angle_tolerance_changed(axis, value)
+
+    def _adjust_tolerance(self, axis: str, delta: float) -> None:
+        """Increment or decrement tolerance via large + / - buttons."""
+
+        if axis == "front":
+            current = self.front_tolerance_scale.get()
+        elif axis == "side":
+            current = self.side_tolerance_scale.get()
+        elif axis == "side_back":
+            current = self.side_back_tolerance_scale.get()
+        else:
+            return
+        self._update_tolerance(axis, current + delta)
+
+    def _apply_tolerance_from_entry(self, axis: str, _event: tk.Event | None = None) -> None:
+        """Commit tolerance typed manually in the entry field."""
+
+        if axis == "front":
+            variable = self.front_tolerance_var
+        elif axis == "side":
+            variable = self.side_tolerance_var
+        else:
+            variable = self.side_back_tolerance_var
+        raw = variable.get().strip().replace(",", ".")
+        self._update_tolerance(axis, raw)
+
+    def _build_settings_page(self, parent: tk.Frame) -> None:
+        """Build the settings screen with angle thresholds and camera assignment."""
+
+        card = tk.Frame(parent, bg="#0d1527", highlightthickness=1, highlightbackground="#27324a", bd=0)
+        card.pack(fill="both", expand=True, padx=6, pady=6)
+
+        tk.Label(card, text="Ustawienia", bg="#0d1527", fg="#f5fbff", font=("Segoe UI", 20, "bold")).pack(anchor="w", padx=20, pady=(18, 4))
+        tk.Label(
+            card,
+            text="Dostosuj tolerancję przodu, boku nogi i boku pleców oraz przypisanie kamer do widoków.",
+            bg="#0d1527",
+            fg="#8aa0bf",
+            font=("Segoe UI", 10),
+        ).pack(anchor="w", padx=20, pady=(0, 14))
+
+        status_box = tk.Frame(card, bg="#10192c", highlightthickness=1, highlightbackground="#314058", bd=0)
+        status_box.pack(fill="x", padx=16, pady=(0, 12))
+        tk.Label(status_box, text="Status kamer", bg="#10192c", fg="#dbe7f6", font=("Segoe UI", 10, "bold")).pack(anchor="w", padx=14, pady=(12, 6))
+        tk.Label(status_box, textvariable=self.connection_label, bg="#10192c", fg="#9eb0c9", font=("Segoe UI", 10), wraplength=760, justify="left").pack(anchor="w", padx=14, pady=(0, 12))
+
+        tolerance_box = tk.Frame(card, bg="#10192c", highlightthickness=1, highlightbackground="#314058", bd=0)
+        tolerance_box.pack(fill="x", padx=16, pady=(0, 12))
+        tk.Label(tolerance_box, text="Kąt dopuszczalny (± stopni)", bg="#10192c", fg="#dbe7f6", font=("Segoe UI", 10, "bold")).pack(anchor="w", padx=14, pady=(12, 8))
+        front_card = tk.Frame(tolerance_box, bg="#0f1a2f", highlightthickness=1, highlightbackground="#314058", bd=0)
+        front_card.pack(fill="x", padx=14, pady=(0, 8))
+        tk.Label(front_card, text="Przód", bg="#0f1a2f", fg="#cfe1f5", font=("Segoe UI", 11, "bold")).pack(anchor="w", padx=12, pady=(10, 6))
+        front_controls = tk.Frame(front_card, bg="#0f1a2f")
+        front_controls.pack(fill="x", padx=12, pady=(0, 10))
+        tk.Button(
+            front_controls,
+            text="−",
+            command=lambda: self._adjust_tolerance("front", -0.5),
+            bg="#132743",
+            fg="#e8f3ff",
+            activebackground="#1a355a",
+            activeforeground="#ffffff",
+            relief="flat",
+            bd=0,
+            font=("Segoe UI", 14, "bold"),
+            padx=14,
+            pady=4,
+            width=3,
+        ).pack(side="left")
+        front_scale = tk.Scale(
+            front_controls,
+            from_=1.0,
+            to=45.0,
+            orient="horizontal",
+            resolution=0.5,
+            showvalue=False,
+            variable=self.front_tolerance_scale,
+            command=lambda value: self._update_tolerance("front", value),
+            bg="#0f1a2f",
+            fg="#cfe1f5",
+            troughcolor="#1c2f4f",
+            activebackground="#35d0ff",
+            highlightthickness=0,
+            sliderlength=22,
+        )
+        front_scale.pack(side="left", fill="x", expand=True, padx=10)
+        tk.Button(
+            front_controls,
+            text="+",
+            command=lambda: self._adjust_tolerance("front", 0.5),
+            bg="#132743",
+            fg="#e8f3ff",
+            activebackground="#1a355a",
+            activeforeground="#ffffff",
+            relief="flat",
+            bd=0,
+            font=("Segoe UI", 14, "bold"),
+            padx=14,
+            pady=4,
+            width=3,
+        ).pack(side="left")
+        front_entry = tk.Entry(
+            front_controls,
+            textvariable=self.front_tolerance_var,
+            width=6,
+            justify="center",
+            bg="#0b1020",
+            fg="#dbe7f6",
+            insertbackground="#dbe7f6",
+            relief="flat",
+            highlightthickness=1,
+            highlightbackground="#314058",
+            font=("Segoe UI", 11, "bold"),
+        )
+        front_entry.pack(side="left", padx=(10, 0))
+        tk.Label(front_controls, text="°", bg="#0f1a2f", fg="#cfe1f5", font=("Segoe UI", 11, "bold")).pack(side="left", padx=(4, 0))
+        front_entry.bind("<Return>", lambda event: self._apply_tolerance_from_entry("front", event))
+        front_entry.bind("<FocusOut>", lambda event: self._apply_tolerance_from_entry("front", event))
+
+        side_card = tk.Frame(tolerance_box, bg="#0f1a2f", highlightthickness=1, highlightbackground="#314058", bd=0)
+        side_card.pack(fill="x", padx=14, pady=(0, 12))
+        tk.Label(side_card, text="Bok - noga", bg="#0f1a2f", fg="#cfe1f5", font=("Segoe UI", 11, "bold")).pack(anchor="w", padx=12, pady=(10, 6))
+        side_controls = tk.Frame(side_card, bg="#0f1a2f")
+        side_controls.pack(fill="x", padx=12, pady=(0, 10))
+        tk.Button(
+            side_controls,
+            text="−",
+            command=lambda: self._adjust_tolerance("side", -0.5),
+            bg="#132743",
+            fg="#e8f3ff",
+            activebackground="#1a355a",
+            activeforeground="#ffffff",
+            relief="flat",
+            bd=0,
+            font=("Segoe UI", 14, "bold"),
+            padx=14,
+            pady=4,
+            width=3,
+        ).pack(side="left")
+        side_scale = tk.Scale(
+            side_controls,
+            from_=1.0,
+            to=45.0,
+            orient="horizontal",
+            resolution=0.5,
+            showvalue=False,
+            variable=self.side_tolerance_scale,
+            command=lambda value: self._update_tolerance("side", value),
+            bg="#0f1a2f",
+            fg="#cfe1f5",
+            troughcolor="#1c2f4f",
+            activebackground="#35d0ff",
+            highlightthickness=0,
+            sliderlength=22,
+        )
+        side_scale.pack(side="left", fill="x", expand=True, padx=10)
+        tk.Button(
+            side_controls,
+            text="+",
+            command=lambda: self._adjust_tolerance("side", 0.5),
+            bg="#132743",
+            fg="#e8f3ff",
+            activebackground="#1a355a",
+            activeforeground="#ffffff",
+            relief="flat",
+            bd=0,
+            font=("Segoe UI", 14, "bold"),
+            padx=14,
+            pady=4,
+            width=3,
+        ).pack(side="left")
+        side_entry = tk.Entry(
+            side_controls,
+            textvariable=self.side_tolerance_var,
+            width=6,
+            justify="center",
+            bg="#0b1020",
+            fg="#dbe7f6",
+            insertbackground="#dbe7f6",
+            relief="flat",
+            highlightthickness=1,
+            highlightbackground="#314058",
+            font=("Segoe UI", 11, "bold"),
+        )
+        side_entry.pack(side="left", padx=(10, 0))
+        tk.Label(side_controls, text="°", bg="#0f1a2f", fg="#cfe1f5", font=("Segoe UI", 11, "bold")).pack(side="left", padx=(4, 0))
+        side_entry.bind("<Return>", lambda event: self._apply_tolerance_from_entry("side", event))
+        side_entry.bind("<FocusOut>", lambda event: self._apply_tolerance_from_entry("side", event))
+
+        back_card = tk.Frame(tolerance_box, bg="#0f1a2f", highlightthickness=1, highlightbackground="#314058", bd=0)
+        back_card.pack(fill="x", padx=14, pady=(0, 12))
+        tk.Label(back_card, text="Bok - plecy", bg="#0f1a2f", fg="#cfe1f5", font=("Segoe UI", 11, "bold")).pack(anchor="w", padx=12, pady=(10, 6))
+        back_controls = tk.Frame(back_card, bg="#0f1a2f")
+        back_controls.pack(fill="x", padx=12, pady=(0, 10))
+        tk.Button(
+            back_controls,
+            text="−",
+            command=lambda: self._adjust_tolerance("side_back", -0.5),
+            bg="#132743",
+            fg="#e8f3ff",
+            activebackground="#1a355a",
+            activeforeground="#ffffff",
+            relief="flat",
+            bd=0,
+            font=("Segoe UI", 14, "bold"),
+            padx=14,
+            pady=4,
+            width=3,
+        ).pack(side="left")
+        back_scale = tk.Scale(
+            back_controls,
+            from_=1.0,
+            to=45.0,
+            orient="horizontal",
+            resolution=0.5,
+            showvalue=False,
+            variable=self.side_back_tolerance_scale,
+            command=lambda value: self._update_tolerance("side_back", value),
+            bg="#0f1a2f",
+            fg="#cfe1f5",
+            troughcolor="#1c2f4f",
+            activebackground="#35d0ff",
+            highlightthickness=0,
+            sliderlength=22,
+        )
+        back_scale.pack(side="left", fill="x", expand=True, padx=10)
+        tk.Button(
+            back_controls,
+            text="+",
+            command=lambda: self._adjust_tolerance("side_back", 0.5),
+            bg="#132743",
+            fg="#e8f3ff",
+            activebackground="#1a355a",
+            activeforeground="#ffffff",
+            relief="flat",
+            bd=0,
+            font=("Segoe UI", 14, "bold"),
+            padx=14,
+            pady=4,
+            width=3,
+        ).pack(side="left")
+        back_entry = tk.Entry(
+            back_controls,
+            textvariable=self.side_back_tolerance_var,
+            width=6,
+            justify="center",
+            bg="#0b1020",
+            fg="#dbe7f6",
+            insertbackground="#dbe7f6",
+            relief="flat",
+            highlightthickness=1,
+            highlightbackground="#314058",
+            font=("Segoe UI", 11, "bold"),
+        )
+        back_entry.pack(side="left", padx=(10, 0))
+        tk.Label(back_controls, text="°", bg="#0f1a2f", fg="#cfe1f5", font=("Segoe UI", 11, "bold")).pack(side="left", padx=(4, 0))
+        back_entry.bind("<Return>", lambda event: self._apply_tolerance_from_entry("side_back", event))
+        back_entry.bind("<FocusOut>", lambda event: self._apply_tolerance_from_entry("side_back", event))
+
+        sources_box = tk.Frame(card, bg="#10192c", highlightthickness=1, highlightbackground="#314058", bd=0)
+        sources_box.pack(fill="x", padx=16, pady=(0, 14))
+        tk.Label(sources_box, text="Przypisanie kamer do widoków", bg="#10192c", fg="#dbe7f6", font=("Segoe UI", 10, "bold")).pack(anchor="w", padx=14, pady=(12, 8))
+
+        self._settings_camera_vars = []
+        self._settings_camera_boxes = []
+        source_values = ["Brak"]
+        for slot_index in range(self.config.max_camera_slots):
+            row = tk.Frame(sources_box, bg="#10192c")
+            row.pack(fill="x", padx=14, pady=(0, 8))
+            tk.Label(row, text=f"Widok {slot_index + 1}", bg="#10192c", fg="#cfe1f5", font=("Segoe UI", 10)).pack(side="left")
+            variable = tk.StringVar(value="Brak")
+            combo = ttk.Combobox(
+                row,
+                textvariable=variable,
+                values=source_values,
+                width=18,
+                state="readonly",
+                style="CameraSelect.TCombobox",
+            )
+            combo.pack(side="right")
+            combo.bind(
+                "<<ComboboxSelected>>",
+                lambda _event, index=slot_index, var=variable: self.callbacks.on_camera_source_changed(index, var.get()),
+            )
+            self._settings_camera_vars.append(variable)
+            self._settings_camera_boxes.append(combo)
+
     def _set_nav_section(self, section: str) -> None:
         """Highlight the selected sidebar section."""
 
@@ -589,6 +962,19 @@ class CyberTrainerView(tk.Tk):
                 button.configure(bg="#17304f", fg="#ffffff", highlightbackground="#6de7ff")
             else:
                 button.configure(bg="#101a30", fg="#d6e1f2", highlightbackground="#2f415a")
+
+        if not self.camera_only:
+            return
+
+        if not hasattr(self, "_camera_page") or not hasattr(self, "_settings_page"):
+            return
+
+        if section == "Ustawienia":
+            self._camera_page.place_forget()
+            self._settings_page.place(relx=0.5, rely=0.5, anchor="center", relwidth=1.0, relheight=1.0)
+        else:
+            self._settings_page.place_forget()
+            self._camera_page.place(relx=0.5, rely=0.5, anchor="center", relwidth=1.0, relheight=1.0)
 
     def _build_main(self, parent: ttk.Frame) -> None:
         """Build the main cards for camera preview, controls, feedback and stats."""

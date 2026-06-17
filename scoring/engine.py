@@ -42,47 +42,34 @@ class SessionScorer:
         self.quality = self.initial_quality
         self.feedback = self.initial_feedback
         
-    def grade_hip_going_up(self, hip_angle: float) -> bool:
-        """Ocena klatki bioder podczas ruchu w górę."""
+    def grade_hip_cycle(self, hip_angle: float) -> bool:
+        """Ocena tułowia w całym cyklu ruchu."""
         import math
         if math.isnan(hip_angle):
             return False
-        # Podczas ruchu w górę akceptujemy szerszy zakres klatek roboczych
         return 90.0 <= hip_angle <= 190.0
 
-    def grade_hip_holding(self, hip_angle: float) -> bool:
-        """Ocena klatki bioder podczas utrzymania na górze (blokada)."""
+    def grade_hip_top_hold(self, hip_angle: float) -> bool:
+        """Ocena tułowia podczas 1-sekundowego zatrzymania na górze."""
         import math
         if math.isnan(hip_angle):
             return False
-        # Ścisły wyprost w fazie holding
         return 170.0 <= hip_angle <= 190.0
 
-    def grade_knee_going_up(self, knee_front: float, knee_side: float) -> bool:
-        """Ocena klatki kolan (przód i bok) podczas ruchu w górę."""
+    def grade_knee_stable(self, knee_side: float) -> bool:
+        """Ocena stabilności kąta kolana podczas zatrzymania na górze."""
         import math
-        if math.isnan(knee_front) or math.isnan(knee_side):
+        if math.isnan(knee_side):
             return False
-        # Przykładowe kryteria stabilizacji: przód stabilny, bok zgina się odpowiednio do fazy
-        # Wstaw tutaj swoje idealne widełki matematyczne
-        return (160.0 <= knee_front <= 190.0) and (80.0 <= knee_side <= 140.0)
-
-    def grade_knee_holding(self, knee_front: float, knee_side: float) -> bool:
-        """Ocena klatki kolan (przód i bok) podczas utrzymania na górze."""
-        import math
-        if math.isnan(knee_front) or math.isnan(knee_side):
-            return False
-        # Na górze kolana powinny być w pełnej stabilizacji kątowej
-        # Wstaw tutaj swoje idealne widełki matematyczne
-        return (170.0 <= knee_front <= 190.0) and (160.0 <= knee_side <= 190.0)
+        return 80.0 <= knee_side <= 100.0
 
     def register_repetition(self, correct_hip_frames: int, correct_knee_frames: int, total_frames: int) -> str:
         """Advance the repetition counter, compute the quality, and return the feedback message."""
         self.repetitions += 1
         
         if total_frames > 0:
-            hip_score = (correct_hip_frames / total_frames) * 50.0
-            knee_score = (correct_knee_frames / total_frames) * 50.0
+            hip_score = (correct_hip_frames / total_frames) * 60.0
+            knee_score = (correct_knee_frames / total_frames) * 40.0
             calculated_quality = int(hip_score + knee_score)
             self.quality = max(self.minimum_quality, min(100, calculated_quality))
         else:

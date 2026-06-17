@@ -6,7 +6,7 @@ import random
 import threading
 import time
 import math
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Sequence
 
@@ -19,7 +19,7 @@ from pose.analyzer import MovementAnalyzer, PoseMetrics
 from scoring.engine import ScoreSnapshot, SessionScorer
 from ui.styles import StyleManager
 from ui.view import CyberTrainerView, ViewCallbacks
-from utils.config import AppConfig, build_default_config
+from utils.config import AppConfig, build_default_config, save_persisted_settings
 from utils.session_store import SessionResult, SessionStore
 from utils.time_utils import format_elapsed_seconds
 
@@ -44,6 +44,8 @@ class HistoryEntry:
 class CyberTrainerApp:
     """Wire the view, camera stack, scoring engine and transport layer together."""
 
+    TOP_HOLD_SECONDS = 0.25
+
     def __init__(self, config: AppConfig | None = None) -> None:
         """Build the application with injectable defaults."""
         self.config = config or build_default_config()
@@ -55,7 +57,17 @@ class CyberTrainerApp:
             minimum_quality=self.config.minimum_quality,
             feedback="Sugestie",
         )
-        self.analyzers = {i: MovementAnalyzer() for i in range(self.config.max_camera_slots)}
+        self.front_tolerance_degrees = self.config.front_tolerance_degrees
+        self.side_tolerance_degrees = self.config.side_tolerance_degrees
+        self.side_back_tolerance_degrees = self.config.side_back_tolerance_degrees
+        self.analyzers = {
+            i: MovementAnalyzer(
+                front_tolerance_degrees=self.front_tolerance_degrees,
+                side_tolerance_degrees=self.side_tolerance_degrees,
+                side_back_tolerance_degrees=self.side_back_tolerance_degrees,
+            )
+            for i in range(self.config.max_camera_slots)
+        }
 
         self.session_active = False
         self.session_paused = False
@@ -71,9 +83,11 @@ class CyberTrainerApp:
         self._last_camera_scan_at = 0.0
         self._remote_frame: Image.Image | None = None
         self._remote_frame_lock = threading.Lock()
+        self._gesture_toggle_block_until = 0.0
 
         # --- Zmienne maszyny stanów i kalkulatora jakości powtórzeń ---
-        self._rep_state = "START"  # START -> GOING_UP -> TOP_HOLDING -> LOCK_REQUIRE_DOWN
+        self._rep_state = "WAITING_TOP_START"  # WAITING_TOP_START -> WAITING_FOR_DESCENT -> GOING_DOWN_TO_BOTTOM -> GOING_UP_TO_TOP -> TOP_HOLDING
+        self._bottom_reached_in_cycle = False
         self._top_hold_started_at: float | None = None
         self._rep_started_elapsed = 0.0
         self._current_rep_frames_count = 0
@@ -85,11 +99,13 @@ class CyberTrainerApp:
             config=self.config,
             callbacks=ViewCallbacks(
                 on_start_session=self.start_session,
+                on_primary_action=self.primary_action,
                 on_toggle_pause=self.toggle_pause,
                 on_end_session=self.end_session,
                 on_save_result=self.save_result,
                 on_close=self._on_close,
                 on_camera_source_changed=self._on_camera_source_changed,
+                on_angle_tolerance_changed=self._on_angle_tolerance_changed,
             ),
             camera_only=True,
         )
@@ -115,8 +131,14 @@ class CyberTrainerApp:
         self._update_camera_status()
         self.view.set_feedback("Sugestie")
         self.view.set_metrics(self.scorer.snapshot(), self._format_elapsed())
-        self.view.set_workout_status("Gotowy", "Naciśnij Start albo unieś rękę, aby rozpocząć ustawianie pozycji startowej.")
+        self.view.set_workout_status("Gotowy", "Jedna dłoń nad głową = start, dwie dłonie = stop.")
+        self.view.set_primary_action_label("START")
         self.view.set_pose_metrics(PoseMetrics(False))
+        self.view.set_angle_tolerances(
+            self.front_tolerance_degrees,
+            self.side_tolerance_degrees,
+            self.side_back_tolerance_degrees,
+        )
 
     def _sync_score_state(self) -> None:
         """Keep the scorer object aligned with the controller counters."""
@@ -146,13 +168,23 @@ class CyberTrainerApp:
 
     def start_session(self) -> None:
         """Start a new training session if one is not already active."""
-        if self.session_mode in {"arming", "active", "paused"}:
+        if self.session_mode in {"active", "paused"}:
             return
         self._arm_session(trigger="button")
 
+    def primary_action(self) -> None:
+        """Handle the main Start/Stop button in the right panel."""
+        if self.session_mode == "active":
+            self.end_session()
+            return
+        if self.session_mode == "paused":
+            self.toggle_pause()
+            return
+        self.start_session()
+
     def _arm_session(self, trigger: str) -> None:
-        """Prepare a fresh series and wait for the correct start pose."""
-        self.session_mode = "arming"
+        """Prepare and start a fresh series."""
+        self.session_mode = "active"
         self.session_active = False
         self.session_paused = False
         self.session_started_at = 0.0
@@ -164,7 +196,8 @@ class CyberTrainerApp:
         self._last_pose_zone = "unknown"
         
         # Reset zmiennych nowej maszyny stanów przy starcie sesji
-        self._rep_state = "START"
+        self._rep_state = "WAITING_TOP_START"
+        self._bottom_reached_in_cycle = False
         self._top_hold_started_at = None
         self._rep_started_elapsed = 0.0
         self._current_rep_frames_count = 0
@@ -176,9 +209,14 @@ class CyberTrainerApp:
             analyzer.reset()
         self.scorer.reset()
 
-        self.view.set_workout_status("Ustaw start", "Ustaw biodro-kolano-stopa w okolicach 90° i pokaż pozycję startową.")
-        self.view.set_feedback("Ustaw pozycję startową. Kąt biodro-kolano-stopa ma być około 90°.")
-        self.view.append_event(f"Seria przygotowywana ({trigger})")
+        self.session_active = True
+        self.session_started_at = time.time()
+        self.last_tick = self.session_started_at
+
+        self.view.set_workout_status("Aktywna", "Jedna dłoń nad głową = start, dwie dłonie = stop.")
+        self.view.set_feedback("Seria uruchomiona.")
+        self.view.set_primary_action_label("STOP")
+        self.view.append_event(f"Seria uruchomiona ({trigger})")
         self._sync_score_state()
 
         self._update_camera_status()
@@ -198,15 +236,12 @@ class CyberTrainerApp:
             self.start_session()
             return
 
-        if self.session_mode == "arming":
-            self.view.set_feedback("Najpierw ustaw pozycję startową.")
-            return
-
         if self.session_mode == "active":
             self.session_mode = "paused"
             self.session_paused = True
             self.view.set_workout_status("Pauza", "Seria wstrzymana. Czas i tempo nie rosną w trakcie pauzy.")
             self.view.set_feedback("Seria wstrzymana.")
+            self.view.set_primary_action_label("START")
             self.view.append_event("Seria wstrzymana")
             return
 
@@ -216,7 +251,16 @@ class CyberTrainerApp:
             self.last_tick = time.time()
             self.view.set_workout_status("Aktywna", "Seria wznowiona.")
             self.view.set_feedback("Seria wznowiona.")
+            self.view.set_primary_action_label("STOP")
             self.view.append_event("Seria wznowiona")
+
+    def _set_gesture_toggle_block(self, seconds: float = 1.0) -> None:
+        """Prevent immediate gesture re-triggering after a state change."""
+
+        self._gesture_toggle_block_until = time.time() + seconds
+
+    def _gesture_toggle_block_active(self, now: float) -> bool:
+        return now < self._gesture_toggle_block_until
 
     def end_session(self) -> None:
         """End the current session and persist the result automatically."""
@@ -226,9 +270,11 @@ class CyberTrainerApp:
         self.session_mode = "idle"
         self.session_active = False
         self.session_paused = False
+        self._set_gesture_toggle_block()
         self.view.set_connection_status("Kamera nieaktywna")
-        self.view.set_workout_status("Zakończona", "Seria zakończona. Możesz rozpocząć nową próbę.")
+        self.view.set_workout_status("Zakończona", "Jedna dłoń nad głową = start, dwie dłonie = stop.")
         self.view.set_feedback("Seria zakończona.")
+        self.view.set_primary_action_label("START")
         self.view.append_event("Seria zakończona")
         self.save_result(auto=True)
 
@@ -264,6 +310,45 @@ class CyberTrainerApp:
             self.camera.source_options(),
             self.camera.slot_source_labels(),
         )
+
+    def _on_angle_tolerance_changed(self, axis: str, value: float) -> None:
+        """Apply angle tolerance changes from the settings view."""
+
+        clamped = max(1.0, min(45.0, float(value)))
+        if axis == "front":
+            self.front_tolerance_degrees = clamped
+            label = "przód"
+        elif axis == "side":
+            self.side_tolerance_degrees = clamped
+            label = "bok: noga"
+        elif axis == "side_back":
+            self.side_back_tolerance_degrees = clamped
+            label = "bok: plecy"
+        else:
+            return
+
+        for analyzer in self.analyzers.values():
+            analyzer.set_tolerances(
+                front_tolerance_degrees=self.front_tolerance_degrees,
+                side_tolerance_degrees=self.side_tolerance_degrees,
+                side_back_tolerance_degrees=self.side_back_tolerance_degrees,
+            )
+
+        self.view.set_angle_tolerances(
+            self.front_tolerance_degrees,
+            self.side_tolerance_degrees,
+            self.side_back_tolerance_degrees,
+        )
+        save_persisted_settings(
+            self.config.settings_file,
+            replace(
+                self.config,
+                front_tolerance_degrees=self.front_tolerance_degrees,
+                side_tolerance_degrees=self.side_tolerance_degrees,
+                side_back_tolerance_degrees=self.side_back_tolerance_degrees,
+            ),
+        )
+        self.view.append_event(f"Zmieniono tolerancję kąta ({label}) na ±{clamped:.1f}°")
 
     def _store_remote_frame(self, image: Image.Image) -> None:
         """Cache the latest remote image received over the network."""
@@ -373,27 +458,23 @@ class CyberTrainerApp:
 
         # Sprawdzenie, czy dłoń jest uniesiona
         hand_is_raised = getattr(pose_metrics, "hand_raised", False)
+        start_gesture = getattr(pose_metrics, "start_gesture", hand_is_raised)
+        stop_gesture = getattr(pose_metrics, "stop_gesture", False)
+        two_hands_visible = getattr(pose_metrics, "two_hands_visible", False)
+        gesture_blocked = self._gesture_toggle_block_active(now)
 
-        # 1. TWOJE ORYGINALNE PRZEŁĄCZANIE STANÓW GESTEM
+        # Gesty sterujące sesją
         if self.session_mode == "idle":
-            if hand_is_raised:
+            if gesture_blocked:
+                return
+            if start_gesture:
                 self._arm_session(trigger="gesture")
             return
 
-        if self.session_mode == "arming":
-            hip_angle = getattr(pose_metrics, "upper_body_angle", 0.0)
-            if pose_metrics.pose_detected and (80.0 <= hip_angle <= 140.0):
-                self.session_mode = "active"
-                self.session_active = True
-                self.session_started_at = now
-                self.last_tick = now
-                self.view.set_workout_status("Aktywna", "Pozycja startowa wykryta! Rozpocznij hip thrusty.")
-                self.view.set_feedback("Rozpocznij ćwiczenie. Unieś biodra do pełnego wyprostu.")
-                self.view.append_event("Seria aktywowana")
-            return
-
         if self.session_mode == "active":
-            if hand_is_raised:
+            if gesture_blocked:
+                return
+            if stop_gesture:
                 self.end_session()
                 return
 
@@ -405,38 +486,58 @@ class CyberTrainerApp:
         self.session_elapsed += now - self.last_tick
         self.last_tick = now
 
-        # 2. MASZYNA STANÓW HIP THRUST Z DYNAMICZNĄ OCENĄ KLATEK (ENGINE)
+        # 2. MASZYNA STANÓW HIP THRUST: top -> dół -> góra -> 1 s hold na górze
         hip_angle = getattr(pose_metrics, "upper_body_angle", 0.0)
         knee_front = getattr(pose_metrics, "knee_angle_front", 0.0)
         knee_side = getattr(pose_metrics, "knee_angle_side", 0.0)
 
+        in_bottom_position = not math.isnan(hip_angle) and (80.0 <= hip_angle <= 140.0)
+        in_top_position = not math.isnan(hip_angle) and (175.0 <= hip_angle <= 185.0)
+
         # Pobieranie poprawności klatki z engine.py na podstawie aktualnego stanu
-        if self._rep_state == "GOING_UP":
-            hip_correct = self.scorer.grade_hip_going_up(hip_angle)
-            knee_correct = self.scorer.grade_knee_going_up(knee_front, knee_side)
-        elif self._rep_state == "TOP_HOLDING":
-            hip_correct = self.scorer.grade_hip_holding(hip_angle)
-            knee_correct = self.scorer.grade_knee_holding(knee_front, knee_side)
-        else:
-            # Dla pozostałych stanów (START/LOCK) bazowe sprawdzenie bezpieczeństwa
-            hip_correct = not math.isnan(hip_angle) and (170.0 <= hip_angle <= 190.0 or self._rep_state == "GOING_UP")
+        if self._rep_state in {"GOING_DOWN_TO_BOTTOM", "GOING_UP_TO_TOP"}:
+            hip_correct = self.scorer.grade_hip_cycle(hip_angle)
             knee_correct = True
+        elif self._rep_state == "TOP_HOLDING":
+            hip_correct = self.scorer.grade_hip_top_hold(hip_angle)
+            knee_correct = self.scorer.grade_knee_stable(knee_side)
+        else:
+            hip_correct = False
+            knee_correct = False
 
         if pose_metrics.pose_detected:
-            if self._rep_state == "START":
-                if 90.0 <= hip_angle <= 135.0:
-                    self._rep_state = "GOING_UP"
+            if self._rep_state == "WAITING_TOP_START":
+                if in_top_position:
+                    if self._top_hold_started_at is None:
+                        self._top_hold_started_at = now
+                    elif (now - self._top_hold_started_at) >= self.TOP_HOLD_SECONDS:
+                        self._rep_state = "WAITING_FOR_DESCENT"
+                        self._top_hold_started_at = None
+                else:
+                    self._top_hold_started_at = None
+
+            elif self._rep_state == "WAITING_FOR_DESCENT":
+                if not in_top_position:
+                    self._rep_state = "GOING_DOWN_TO_BOTTOM"
                     self._rep_started_elapsed = self.session_elapsed
                     self._current_rep_frames_count = 0
                     self._current_rep_hip_correct_frames = 0
                     self._current_rep_knee_correct_frames = 0
 
-            elif self._rep_state == "GOING_UP":
+            elif self._rep_state == "GOING_DOWN_TO_BOTTOM":
                 self._current_rep_frames_count += 1
                 if hip_correct: self._current_rep_hip_correct_frames += 1
                 if knee_correct: self._current_rep_knee_correct_frames += 1
 
-                if 175.0 <= hip_angle <= 185.0:
+                if in_bottom_position:
+                    self._rep_state = "GOING_UP_TO_TOP"
+
+            elif self._rep_state == "GOING_UP_TO_TOP":
+                self._current_rep_frames_count += 1
+                if hip_correct: self._current_rep_hip_correct_frames += 1
+                if knee_correct: self._current_rep_knee_correct_frames += 1
+
+                if in_top_position:
                     self._rep_state = "TOP_HOLDING"
                     self._top_hold_started_at = now
 
@@ -445,20 +546,17 @@ class CyberTrainerApp:
                 if hip_correct: self._current_rep_hip_correct_frames += 1
                 if knee_correct: self._current_rep_knee_correct_frames += 1
 
-                if not (175.0 <= hip_angle <= 185.0):
-                    self._rep_state = "GOING_UP"
+                if not in_top_position:
+                    self._rep_state = "GOING_DOWN_TO_BOTTOM"
                     self._top_hold_started_at = None
                 else:
-                    if self._top_hold_started_at and (now - self._top_hold_started_at) >= 1.0:
-                        
-                        # Przekazanie zgromadzonych klatek do finalnego podsumowania w engine.py
+                    if self._top_hold_started_at and (now - self._top_hold_started_at) >= self.TOP_HOLD_SECONDS:
                         msg = self.scorer.register_repetition(
                             correct_hip_frames=self._current_rep_hip_correct_frames,
                             correct_knee_frames=self._current_rep_knee_correct_frames,
                             total_frames=self._current_rep_frames_count
                         )
-                        
-                        # Synchronizacja parametrów z Twoimi zmiennymi aplikacji
+
                         self._rep_count = self.scorer.repetitions
                         self._last_calculated_quality = self.scorer.quality
                         repetition_event = True
@@ -469,13 +567,10 @@ class CyberTrainerApp:
                         self.view.append_event(msg)
                         self.view.set_feedback(msg)
 
-                        self._rep_state = "LOCK_REQUIRE_DOWN"
-
-            elif self._rep_state == "LOCK_REQUIRE_DOWN":
-                if hip_angle < 135.0:
-                    self._rep_state = "START"
+                        self._rep_state = "WAITING_FOR_DESCENT"
+                        self._top_hold_started_at = None
         else:
-            if self._rep_state in {"GOING_UP", "TOP_HOLDING"}:
+            if self._rep_state in {"GOING_DOWN_TO_BOTTOM", "GOING_UP_TO_TOP", "TOP_HOLDING"}:
                 self._current_rep_frames_count += 1
 
         # 3. TWOJA ORYGINALNA SYNCHRONIZACJA STATUSU I WIDOKU UI

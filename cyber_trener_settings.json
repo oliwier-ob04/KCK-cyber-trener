@@ -1,0 +1,5 @@
+{
+  "front_tolerance_degrees": 10.0,
+  "side_tolerance_degrees": 10.0,
+  "side_back_tolerance_degrees": 10.0
+}
