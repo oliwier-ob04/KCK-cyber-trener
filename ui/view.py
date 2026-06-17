@@ -80,7 +80,8 @@ class CyberTrainerView(tk.Tk):
         self.technique_knee_value = tk.StringVar(value="stabilne")
         self.technique_knee_color = self.config.accent_green
         self.technique_knee_label_widget = None
-        self.nav_sections = ["Trening", "Historia", "Postępy", "Ustawienia"]
+        self.nav_sections = ["Trening", "Historia", "Analiza", "Postępy", "Ustawienia"]
+        self.disabled_nav_sections = {"Analiza", "Postępy"}
         self.active_nav_section = tk.StringVar(value="Trening")
         self._nav_buttons: dict[str, tk.Button] = {}
         self.left_panel_width = 230
@@ -603,14 +604,15 @@ class CyberTrainerView(tk.Tk):
         ).pack(anchor="w", padx=14, pady=(12, 8))
 
         for label in self.nav_sections:
+            is_disabled = label in self.disabled_nav_sections
             btn = tk.Button(
                 nav,
                 text=label,
                 command=lambda value=label: self._set_nav_section(value),
-                bg="#101a30",
-                fg="#d6e1f2",
-                activebackground="#17304f",
-                activeforeground="#ffffff",
+                bg="#1a1f2e" if is_disabled else "#101a30",
+                fg="#6b7280" if is_disabled else "#d6e1f2",
+                activebackground="#1a1f2e" if is_disabled else "#17304f",
+                activeforeground="#6b7280" if is_disabled else "#ffffff",
                 relief="flat",
                 bd=0,
                 highlightthickness=1,
@@ -619,6 +621,7 @@ class CyberTrainerView(tk.Tk):
                 anchor="w",
                 padx=14,
                 pady=10,
+                state="disabled" if is_disabled else "normal",
             )
             btn.pack(fill="x", padx=12, pady=5)
             self._nav_buttons[label] = btn
@@ -697,14 +700,15 @@ class CyberTrainerView(tk.Tk):
 
             tk.Label(inner, text="Menu", bg=bg, fg="#dbe7f6", font=("Segoe UI", 10, "bold")).pack(anchor="w", padx=16, pady=(2, 8))
             for label in self.nav_sections:
+                is_disabled = label in self.disabled_nav_sections
                 btn = tk.Button(
                     inner,
                     text=label,
                     command=lambda value=label: self._set_nav_section(value),
-                    bg="#101a30",
-                    fg="#d6e1f2",
-                    activebackground="#17304f",
-                    activeforeground="#ffffff",
+                    bg="#1a1f2e" if is_disabled else "#101a30",
+                    fg="#6b7280" if is_disabled else "#d6e1f2",
+                    activebackground="#1a1f2e" if is_disabled else "#17304f",
+                    activeforeground="#6b7280" if is_disabled else "#ffffff",
                     relief="flat",
                     bd=0,
                     highlightthickness=1,
@@ -713,6 +717,7 @@ class CyberTrainerView(tk.Tk):
                     anchor="w",
                     padx=14,
                     pady=10,
+                    state="disabled" if is_disabled else "normal",
                 )
                 btn.pack(fill="x", padx=14, pady=5)
                 self._nav_buttons[label] = btn
@@ -1149,10 +1154,16 @@ class CyberTrainerView(tk.Tk):
     def _set_nav_section(self, section: str) -> None:
         """Highlight the selected sidebar section."""
 
+        # Prevent navigation to disabled sections
+        if section in self.disabled_nav_sections:
+            return
+
         self.active_nav_section.set(section)
         for label, button in self._nav_buttons.items():
             if label == section:
                 button.configure(bg="#17304f", fg="#ffffff", highlightbackground="#6de7ff")
+            elif label in self.disabled_nav_sections:
+                button.configure(bg="#1a1f2e", fg="#6b7280", highlightbackground="#2f415a")
             else:
                 button.configure(bg="#101a30", fg="#d6e1f2", highlightbackground="#2f415a")
 

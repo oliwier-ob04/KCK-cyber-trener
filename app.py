@@ -193,8 +193,21 @@ class CyberTrainerApp:
             self.end_session()
             return
         if self.session_mode == "paused":
+            # Switch to Training tab before resuming
+            current_section = self.view.active_nav_section.get()
+            if current_section != "Trening":
+                self.view._set_nav_section("Trening")
+                # on_nav_section_changed will auto-resume the session, so no need to toggle_pause
+                return
+            # If already on Training tab, toggle pause normally
             self.toggle_pause()
             return
+        
+        # If not on the Training tab, switch to it first and then start the session
+        current_section = self.view.active_nav_section.get()
+        if current_section != "Trening":
+            self.view._set_nav_section("Trening")
+        
         self.start_session()
 
     def _arm_session(self, trigger: str) -> None:
