@@ -3,5 +3,6 @@ opencv-python>=4.7.0
 mediapipe==0.10.14
 Pillow>=9.0.0
 pyaudio>=0.2.11
+pyttsx3>=2.90
 SpeechRecognition>=3.8.1
 pygame>=2.0.0
